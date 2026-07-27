@@ -1,4 +1,6 @@
 .env
+.git
+.gitignore
 __pycache__/
 *.pyc
 venv/
@@ -7,8 +9,4 @@ venv/
 app.log
 .pytest_cache/
 .DS_Store
-*.egg-info/
-dist/
-build/
-.idea/
-.vscode/
+REFACTOR_NOTES.md

@@ -28,6 +28,16 @@ APP_VERSION = os.getenv("APP_VERSION", "1.0.0")
 
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 
+# Comma-separated list of allowed CORS origins, e.g.
+# "https://app.example.com,https://admin.example.com". Falls back to the
+# local Vite dev server so `npm run dev` keeps working without any env setup.
+_default_origins = "http://localhost:5173,http://127.0.0.1:5173"
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", _default_origins).split(",")
+    if origin.strip()
+]
+
 # ---------------------------------------------------------------------
 # Quote of the Day (see app/dashboard/services.get_quote_of_day)
 # ---------------------------------------------------------------------
