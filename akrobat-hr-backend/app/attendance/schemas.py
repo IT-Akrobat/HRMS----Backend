@@ -19,6 +19,8 @@ class CheckOutRequest(BaseModel):
 
     longitude: Optional[float] = None
 
+    location_id: Optional[str] = None
+
 
 class RegularizationRequest(BaseModel):
 

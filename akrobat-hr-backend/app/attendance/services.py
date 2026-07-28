@@ -1779,6 +1779,34 @@ def _enforce_assigned_site(employee_id: str, location_id: Optional[str], action:
         )
 
 
+def _resolve_location_name(location_id: Optional[str]) -> Optional[str]:
+    """
+    Looks up `locations.location_name` for the location_id the client
+    matched client-side (see CheckInOutCard.jsx's nearest-office logic).
+    Used so Recent Activity / audit log descriptions can say *where* a
+    check-in happened ("Checked in — 37m late — at Main Office") instead
+    of just the late-duration, which is all the description carried
+    before. Best-effort: returns None (and the caller just omits the
+    location clause) if location_id is missing or the lookup fails —
+    never blocks the check-in itself.
+    """
+    if not location_id:
+        return None
+    try:
+        location = (
+            supabase_admin.table("locations")
+            .select("location_name")
+            .eq("id", location_id)
+            .maybe_single()
+            .execute()
+        )
+        if location and location.data:
+            return location.data.get("location_name")
+    except Exception as e:
+        logger.error(f"Failed to resolve location name for {location_id}: {e}")
+    return None
+
+
 # ==========================================================================
 # CHECK IN / CHECK OUT (self-service)
 # ==========================================================================
@@ -1877,6 +1905,8 @@ def check_in(auth_user_id: str, data, request: Optional[Request] = None):
         except Exception as e:
             logger.error(f"Failed to send check-in notification: {e}")
 
+        location_name = _resolve_location_name(data.location_id)
+
         record_audit_log(
             module="ATTENDANCE",
             action="CHECK_IN",
@@ -1888,7 +1918,8 @@ def check_in(auth_user_id: str, data, request: Optional[Request] = None):
                 f" — {_format_duration_minutes(late_minutes)} late"
                 if late_minutes
                 else ""
-            ),
+            )
+            + (f" — at {location_name}" if location_name else ""),
             new_values=attendance_data,
             request=request,
         )
@@ -1974,13 +2005,16 @@ def check_out(auth_user_id: str, data, request: Optional[Request] = None):
             },
         )
 
+        location_name = _resolve_location_name(data.location_id)
+
         record_audit_log(
             module="ATTENDANCE",
             action="CHECK_OUT",
             performed_by=auth_user_id,
             target_employee_id=employee_id,
             record_id=existing["id"],
-            description=f"Checked out — {working_minutes} min worked, status: {status}",
+            description=f"Checked out — {working_minutes} min worked, status: {status}"
+            + (f" — at {location_name}" if location_name else ""),
             old_values=existing,
             new_values=updated,
             request=request,
