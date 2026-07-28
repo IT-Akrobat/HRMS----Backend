@@ -4,6 +4,22 @@ from fastapi import HTTPException
 
 from app.core.database import supabase_admin
 
+# The announcements table (see sql/001_schema.sql) stores the body text in
+# a column called "message", but the API contract (schemas.py,
+# AnnouncementResponse) and the frontend both use "description". Insert/
+# update with a "description" key fails with PGRST204 ("Could not find the
+# 'description' column"), so translate at the boundary instead of touching
+# the DB schema or the public API shape.
+
+
+def _row_to_api(row: dict) -> dict:
+    if row is None:
+        return row
+    if "message" in row:
+        row = {**row, "description": row.pop("message")}
+    return row
+
+
 # =========================
 # CREATE ANNOUNCEMENT
 # =========================
@@ -18,7 +34,7 @@ def create_announcement(data, user_id: str):
             .insert(
                 {
                     "title": data.title,
-                    "description": data.description,
+                    "message": data.description,
                     # supabase-py builds the request body with plain
                     # json.dumps(), which doesn't know how to serialize
                     # Python date objects (unlike FastAPI's own response
@@ -31,7 +47,7 @@ def create_announcement(data, user_id: str):
             .execute()
         )
 
-        return response.data[0]
+        return _row_to_api(response.data[0])
 
     except Exception as e:
 
@@ -55,7 +71,7 @@ def get_announcements():
             )
             """).order("created_at", desc=True).execute()
 
-        return response.data
+        return [_row_to_api(row) for row in response.data]
 
     except Exception as e:
 
@@ -82,7 +98,7 @@ def get_active_announcements():
             .execute()
         )
 
-        return response.data
+        return [_row_to_api(row) for row in response.data]
 
     except Exception as e:
 
@@ -106,7 +122,7 @@ def get_announcement(announcement_id: str):
             .execute()
         )
 
-        return response.data
+        return _row_to_api(response.data)
 
     except Exception as e:
 
@@ -131,6 +147,10 @@ def update_announcement(announcement_id: str, data: dict):
         if isinstance(data.get("end_date"), date):
             data["end_date"] = data["end_date"].isoformat()
 
+        # Same "message" vs "description" column mismatch as create.
+        if "description" in data:
+            data["message"] = data.pop("description")
+
         response = (
             supabase_admin.table("announcements")
             .update(data)
@@ -138,7 +158,7 @@ def update_announcement(announcement_id: str, data: dict):
             .execute()
         )
 
-        return response.data[0]
+        return _row_to_api(response.data[0])
 
     except Exception as e:
 
