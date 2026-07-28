@@ -15,6 +15,8 @@ from app.announcements.services import (
 )
 
 from app.core.security import get_current_user
+from app.core.helpers.employee_helper import get_employee_id_for_auth_user
+from app.core.exceptions import not_found
 
 router = APIRouter(prefix="/announcements", tags=["Announcements"])
 
@@ -27,7 +29,16 @@ router = APIRouter(prefix="/announcements", tags=["Announcements"])
 @router.post("/")
 def create(data: CreateAnnouncementRequest, user=Depends(get_current_user)):
 
-    return create_announcement(data, user.id)
+    # user.id from get_current_user is the Supabase AUTH user id, but
+    # announcements.created_by has a foreign key to employees(id) — passing
+    # the auth id straight through violates that FK (23503). Resolve it to
+    # the linked employee first, same as other self-service endpoints do.
+    employee_id = get_employee_id_for_auth_user(user.id)
+
+    if not employee_id:
+        not_found("No employee profile linked to this account.")
+
+    return create_announcement(data, employee_id)
 
 
 # =========================
