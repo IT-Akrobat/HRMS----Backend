@@ -3,6 +3,17 @@ from datetime import date
 from fastapi import HTTPException
 
 from app.core.database import supabase_admin
+from app.core.responses import success_response
+
+# Every other module in this app returns { success, message, data } (see
+# app/core/responses.py -> success_response, and app/holidays/services.py
+# for the same pattern) and the frontend reads announcements the same way
+# everywhere (`res.data || []` — see employee/manager/hr-admin/super-admin
+# Dashboard.jsx). This module used to return the raw list/row instead of
+# that envelope, so `res.data` was always undefined on the frontend and
+# every dashboard silently rendered "No active announcements." regardless
+# of what was actually in the table. Wrapping with success_response fixes
+# that without touching the frontend or the DB schema.
 
 # The announcements table (see sql/001_schema.sql) stores the body text in
 # a column called "message", but the API contract (schemas.py,
@@ -16,12 +27,7 @@ def _row_to_api(row: dict) -> dict:
     if row is None:
         return row
     if "message" in row:
-        # NOTE: don't build this as {**row, "description": row.pop("message")} —
-        # the **row spread captures "message" before pop() removes it from
-        # the original dict, so the old key survives in the new dict
-        # alongside "description". Mutate a copy explicitly instead.
-        row = dict(row)
-        row["description"] = row.pop("message")
+        row = {**row, "description": row.pop("message")}
     return row
 
 
@@ -52,7 +58,10 @@ def create_announcement(data, user_id: str):
             .execute()
         )
 
-        return _row_to_api(response.data[0])
+        return success_response(
+            "Announcement created successfully",
+            data=_row_to_api(response.data[0]),
+        )
 
     except Exception as e:
 
@@ -76,7 +85,10 @@ def get_announcements():
             )
             """).order("created_at", desc=True).execute()
 
-        return [_row_to_api(row) for row in response.data]
+        return success_response(
+            "Announcements fetched successfully",
+            data=[_row_to_api(row) for row in response.data],
+        )
 
     except Exception as e:
 
@@ -103,7 +115,10 @@ def get_active_announcements():
             .execute()
         )
 
-        return [_row_to_api(row) for row in response.data]
+        return success_response(
+            "Active announcements fetched successfully",
+            data=[_row_to_api(row) for row in response.data],
+        )
 
     except Exception as e:
 
@@ -127,7 +142,10 @@ def get_announcement(announcement_id: str):
             .execute()
         )
 
-        return _row_to_api(response.data)
+        return success_response(
+            "Announcement fetched successfully",
+            data=_row_to_api(response.data),
+        )
 
     except Exception as e:
 
@@ -163,7 +181,10 @@ def update_announcement(announcement_id: str, data: dict):
             .execute()
         )
 
-        return _row_to_api(response.data[0])
+        return success_response(
+            "Announcement updated successfully",
+            data=_row_to_api(response.data[0]),
+        )
 
     except Exception as e:
 
