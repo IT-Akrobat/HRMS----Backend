@@ -19,8 +19,12 @@ def create_announcement(data, user_id: str):
                 {
                     "title": data.title,
                     "description": data.description,
-                    "start_date": data.start_date,
-                    "end_date": data.end_date,
+                    # supabase-py builds the request body with plain
+                    # json.dumps(), which doesn't know how to serialize
+                    # Python date objects (unlike FastAPI's own response
+                    # encoder) — send ISO strings ("YYYY-MM-DD") instead.
+                    "start_date": data.start_date.isoformat(),
+                    "end_date": data.end_date.isoformat(),
                     "created_by": user_id,
                 }
             )
@@ -117,6 +121,15 @@ def get_announcement(announcement_id: str):
 def update_announcement(announcement_id: str, data: dict):
 
     try:
+
+        # data comes from UpdateAnnouncementRequest.model_dump(), so
+        # start_date/end_date (when present) are still Python date
+        # objects — same non-serializable issue as create_announcement.
+        if isinstance(data.get("start_date"), date):
+            data["start_date"] = data["start_date"].isoformat()
+
+        if isinstance(data.get("end_date"), date):
+            data["end_date"] = data["end_date"].isoformat()
 
         response = (
             supabase_admin.table("announcements")
