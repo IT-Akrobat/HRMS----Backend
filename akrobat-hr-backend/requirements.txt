@@ -6,3 +6,4 @@ email-validator==2.3.0
 python-dotenv==1.2.2
 supabase==2.31.0
 python-multipart==0.0.32
+tzdata==2025.2

@@ -1487,6 +1487,7 @@
 import math
 from datetime import date, datetime, time, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, Request
 
@@ -1512,6 +1513,29 @@ correction_repo = SupabaseRepository("attendance_corrections")
 
 ATTENDANCE_SELECT = "*, employees(employee_id, full_name)"
 CORRECTION_SELECT = "*, employees(employee_id, full_name)"
+
+# ==========================================================================
+# TIMEZONE — company operates on India time (shift start_time / grace_period
+# in attendance_rules & shifts are entered as IST wall-clock, e.g. "09:00:00"
+# means 9 AM in Chennai, not 9 AM UTC). Cloud hosts (Docker/Render/Railway)
+# default their OS clock to UTC, so a bare `datetime.now()` silently returns
+# UTC instead of IST — every "late" calculation below then compares an IST
+# shift-start against a UTC check-in time, off by exactly the 5h30m offset
+# (e.g. an employee checking in mid-afternoon could be reported as only a
+# few minutes late, because the comparison effectively treats ~2:30 PM as
+# the start of the "late" window instead of 9:00 AM).
+#
+# Fix: always anchor "now" to Asia/Kolkata explicitly, then drop the tzinfo
+# so it stays a naive datetime — every other naive datetime in this module
+# (scheduled_start, stored check_in_time, etc.) is built/interpreted as IST
+# too, so the arithmetic stays consistent regardless of what timezone the
+# server's OS clock is actually set to.
+# ==========================================================================
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def _now_ist() -> datetime:
+    return datetime.now(IST).replace(tzinfo=None)
 
 
 # ==========================================================================
@@ -1783,7 +1807,7 @@ def check_in(auth_user_id: str, data, request: Optional[Request] = None):
         # location) still applies here.
         _validate_geofence(data.location_id, data.latitude, data.longitude)
 
-        check_in_time = datetime.now()
+        check_in_time = _now_ist()
         shift = _get_employee_shift(employee_id, today)
         rule = _get_attendance_rule()
         late_minutes = _late_minutes(check_in_time, today, shift, rule)
@@ -1901,7 +1925,7 @@ def check_out(auth_user_id: str, data, request: Optional[Request] = None):
             bad_request("You have already checked out today.")
 
         check_in_time = datetime.fromisoformat(existing["check_in_time"])
-        check_out_time = datetime.now()
+        check_out_time = _now_ist()
 
         breaks_resp = (
             supabase_admin.table("attendance_breaks")
@@ -2011,7 +2035,7 @@ def start_break(auth_user_id: str, request: Optional[Request] = None):
             .insert(
                 {
                     "attendance_id": attendance["id"],
-                    "break_start": datetime.now().isoformat(),
+                    "break_start": _now_ist().isoformat(),
                 }
             )
             .execute()
@@ -2068,7 +2092,7 @@ def end_break(auth_user_id: str, request: Optional[Request] = None):
 
         break_row = open_break.data[0]
         break_start = datetime.fromisoformat(break_row["break_start"])
-        break_end = datetime.now()
+        break_end = _now_ist()
         break_minutes = int((break_end - break_start).total_seconds() / 60)
 
         updated_break = (
@@ -2172,7 +2196,7 @@ def _close_open_site_visit(
                 "duration_minutes": duration_minutes,
                 "departure_latitude": latitude,
                 "departure_longitude": longitude,
-                "updated_at": datetime.now().isoformat(),
+                "updated_at": _now_ist().isoformat(),
             }
         )
         .eq("id", visit["id"])
@@ -2202,7 +2226,7 @@ def arrive_at_site(auth_user_id: str, data, request: Optional[Request] = None):
 
         _validate_geofence(data.location_id, data.latitude, data.longitude)
 
-        arrival_time = datetime.now()
+        arrival_time = _now_ist()
 
         # Leaving the previous site, if one is still open.
         _close_open_site_visit(
@@ -2275,7 +2299,7 @@ def depart_site(auth_user_id: str, data, request: Optional[Request] = None):
         attendance = _get_open_attendance_or_400(employee_id)
 
         record = _close_open_site_visit(
-            attendance["id"], datetime.now(), data.latitude, data.longitude
+            attendance["id"], _now_ist(), data.latitude, data.longitude
         )
 
         if not record:
@@ -2326,7 +2350,7 @@ def _effective_visit_minutes(visit: dict) -> int:
         return visit.get("duration_minutes") or 0
 
     arrival = datetime.fromisoformat(visit["arrival_time"])
-    live_minutes = max(0, int((datetime.now() - arrival).total_seconds() / 60))
+    live_minutes = max(0, int((_now_ist() - arrival).total_seconds() / 60))
     visit["live_minutes"] = live_minutes
     return live_minutes
 
