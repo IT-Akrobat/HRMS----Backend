@@ -16,7 +16,12 @@ def _row_to_api(row: dict) -> dict:
     if row is None:
         return row
     if "message" in row:
-        row = {**row, "description": row.pop("message")}
+        # NOTE: don't build this as {**row, "description": row.pop("message")} —
+        # the **row spread captures "message" before pop() removes it from
+        # the original dict, so the old key survives in the new dict
+        # alongside "description". Mutate a copy explicitly instead.
+        row = dict(row)
+        row["description"] = row.pop("message")
     return row
 
 
