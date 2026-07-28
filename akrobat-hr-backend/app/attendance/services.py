@@ -1485,7 +1485,7 @@
 #         logger.exception(e)
 #         internal_server_error("Unable to update attendance record.")
 import math
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -1515,27 +1515,30 @@ ATTENDANCE_SELECT = "*, employees(employee_id, full_name)"
 CORRECTION_SELECT = "*, employees(employee_id, full_name)"
 
 # ==========================================================================
-# TIMEZONE — company operates on India time (shift start_time / grace_period
-# in attendance_rules & shifts are entered as IST wall-clock, e.g. "09:00:00"
-# means 9 AM in Chennai, not 9 AM UTC). Cloud hosts (Docker/Render/Railway)
-# default their OS clock to UTC, so a bare `datetime.now()` silently returns
-# UTC instead of IST — every "late" calculation below then compares an IST
-# shift-start against a UTC check-in time, off by exactly the 5h30m offset
-# (e.g. an employee checking in mid-afternoon could be reported as only a
-# few minutes late, because the comparison effectively treats ~2:30 PM as
-# the start of the "late" window instead of 9:00 AM).
+# TIMEZONE — shift start_time / grace_period in attendance_rules & shifts
+# are entered as IST wall-clock (e.g. "09:00:00" means 9 AM in Chennai, not
+# 9 AM UTC). But every stored/returned timestamp in this app (check_in_time,
+# check_out_time, audit log created_at, notification created_at, etc.) is
+# UTC — that's the DB column convention (see utils/date.js's parseServerDate
+# on the frontend: a bare timestamp with no "Z"/offset is always assumed to
+# be UTC). So "now" must stay true UTC; what actually needs converting is
+# the shift's IST-authored start time, which has to be translated to UTC
+# before it's compared against a UTC check-in time — not the other way
+# around. (An earlier version of this fix anchored "now" to IST instead,
+# which fixed the late-minutes math but broke the display convention —
+# every attendance timestamp came back looking 5h30m further in the future
+# than it really was, since the frontend still (correctly, for every other
+# timestamp in the app) assumed bare timestamps are UTC.)
 #
-# Fix: always anchor "now" to Asia/Kolkata explicitly, then drop the tzinfo
-# so it stays a naive datetime — every other naive datetime in this module
-# (scheduled_start, stored check_in_time, etc.) is built/interpreted as IST
-# too, so the arithmetic stays consistent regardless of what timezone the
-# server's OS clock is actually set to.
+# `_now_utc()` is explicit about forcing UTC rather than relying on the
+# server's OS clock already being UTC (cloud hosts default to UTC, but a
+# server misconfigured to local time would silently break this).
 # ==========================================================================
 IST = ZoneInfo("Asia/Kolkata")
 
 
-def _now_ist() -> datetime:
-    return datetime.now(IST).replace(tzinfo=None)
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 # ==========================================================================
@@ -1648,11 +1651,20 @@ def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
 def _late_minutes(
     check_in_time: datetime, for_date: date, shift: Optional[dict], rule: dict
 ) -> int:
+    """
+    `check_in_time` is UTC (see `_now_utc()`). `shift["start_time"]` is
+    authored in IST wall-clock (e.g. "09:00:00" means 9 AM in Chennai), so
+    it has to be localized to IST and converted to UTC before comparing —
+    comparing it directly against a UTC check_in_time (as if "09:00" were
+    already UTC) is off by exactly the IST offset (5h30m), which is what
+    made genuinely-late check-ins show as only a few minutes late.
+    """
     if not shift or not shift.get("start_time"):
         return 0
 
     hh, mm, *_ = str(shift["start_time"]).split(":")
-    scheduled_start = datetime.combine(for_date, time(int(hh), int(mm)))
+    scheduled_start_ist = datetime.combine(for_date, time(int(hh), int(mm)), tzinfo=IST)
+    scheduled_start = scheduled_start_ist.astimezone(timezone.utc).replace(tzinfo=None)
 
     grace = shift.get("grace_period")
     if grace is None:
@@ -1835,7 +1847,7 @@ def check_in(auth_user_id: str, data, request: Optional[Request] = None):
         # location) still applies here.
         _validate_geofence(data.location_id, data.latitude, data.longitude)
 
-        check_in_time = _now_ist()
+        check_in_time = _now_utc()
         shift = _get_employee_shift(employee_id, today)
         rule = _get_attendance_rule()
         late_minutes = _late_minutes(check_in_time, today, shift, rule)
@@ -1956,7 +1968,7 @@ def check_out(auth_user_id: str, data, request: Optional[Request] = None):
             bad_request("You have already checked out today.")
 
         check_in_time = datetime.fromisoformat(existing["check_in_time"])
-        check_out_time = _now_ist()
+        check_out_time = _now_utc()
 
         breaks_resp = (
             supabase_admin.table("attendance_breaks")
@@ -2013,7 +2025,7 @@ def check_out(auth_user_id: str, data, request: Optional[Request] = None):
             performed_by=auth_user_id,
             target_employee_id=employee_id,
             record_id=existing["id"],
-            description=f"Checked out — {working_minutes} min worked, status: {status}"
+            description=f"Checked out — {_format_duration_minutes(working_minutes)} worked, status: {status}"
             + (f" — at {location_name}" if location_name else ""),
             old_values=existing,
             new_values=updated,
@@ -2069,7 +2081,7 @@ def start_break(auth_user_id: str, request: Optional[Request] = None):
             .insert(
                 {
                     "attendance_id": attendance["id"],
-                    "break_start": _now_ist().isoformat(),
+                    "break_start": _now_utc().isoformat(),
                 }
             )
             .execute()
@@ -2126,7 +2138,7 @@ def end_break(auth_user_id: str, request: Optional[Request] = None):
 
         break_row = open_break.data[0]
         break_start = datetime.fromisoformat(break_row["break_start"])
-        break_end = _now_ist()
+        break_end = _now_utc()
         break_minutes = int((break_end - break_start).total_seconds() / 60)
 
         updated_break = (
@@ -2156,7 +2168,7 @@ def end_break(auth_user_id: str, request: Optional[Request] = None):
             performed_by=auth_user_id,
             target_employee_id=employee_id,
             record_id=attendance["id"],
-            description=f"Break ended — {break_minutes} min",
+            description=f"Break ended — {_format_duration_minutes(break_minutes)}",
             request=request,
         )
 
@@ -2230,7 +2242,7 @@ def _close_open_site_visit(
                 "duration_minutes": duration_minutes,
                 "departure_latitude": latitude,
                 "departure_longitude": longitude,
-                "updated_at": _now_ist().isoformat(),
+                "updated_at": _now_utc().isoformat(),
             }
         )
         .eq("id", visit["id"])
@@ -2260,7 +2272,7 @@ def arrive_at_site(auth_user_id: str, data, request: Optional[Request] = None):
 
         _validate_geofence(data.location_id, data.latitude, data.longitude)
 
-        arrival_time = _now_ist()
+        arrival_time = _now_utc()
 
         # Leaving the previous site, if one is still open.
         _close_open_site_visit(
@@ -2333,7 +2345,7 @@ def depart_site(auth_user_id: str, data, request: Optional[Request] = None):
         attendance = _get_open_attendance_or_400(employee_id)
 
         record = _close_open_site_visit(
-            attendance["id"], _now_ist(), data.latitude, data.longitude
+            attendance["id"], _now_utc(), data.latitude, data.longitude
         )
 
         if not record:
@@ -2384,7 +2396,7 @@ def _effective_visit_minutes(visit: dict) -> int:
         return visit.get("duration_minutes") or 0
 
     arrival = datetime.fromisoformat(visit["arrival_time"])
-    live_minutes = max(0, int((_now_ist() - arrival).total_seconds() / 60))
+    live_minutes = max(0, int((_now_utc() - arrival).total_seconds() / 60))
     visit["live_minutes"] = live_minutes
     return live_minutes
 
