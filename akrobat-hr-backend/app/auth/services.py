@@ -3,10 +3,13 @@ from fastapi import HTTPException, Request
 from app.access_control.services import (
     get_access_control_settings,
     get_lockout_status,
+    get_password_changed_at,
     is_ip_allowed,
     is_locked,
+    is_password_expired,
     register_failed_attempt,
     reset_lockout,
+    touch_password_changed_at,
 )
 from app.core.audit import record_audit_log
 from app.core.database import supabase_admin
@@ -91,14 +94,26 @@ def login_user(employee_code: str, password: str, request: Request = None):
             request=request,
         )
 
-        # require_2fa is surfaced as a second return value rather than an
-        # attribute stuck onto `response` -- it's a Pydantic model from
-        # supabase-py and may reject an attribute it doesn't declare. An
-        # OTP challenge step (email/SMS/authenticator code) needs its own
-        # delivery + verification endpoint, which isn't built yet; the
-        # frontend can use this flag to show a "verification required"
-        # state ahead of that landing.
-        return response, bool(access_control.get("require_2fa"))
+        # require_2fa / password expiry are surfaced as extra return
+        # values rather than attributes stuck onto `response` -- it's a
+        # Pydantic model from supabase-py and may reject attributes it
+        # doesn't declare.
+        #
+        # mfa_required: no OTP challenge screen exists yet, so this is
+        # informational only for now -- it doesn't block login.
+        #
+        # password_expired: real, based on user_profiles.password_changed_at
+        # (see sql/018_password_expiry_tracking.sql). Login is still
+        # allowed through (there's no pre-login reset flow to send an
+        # expired-but-locked-out user to), but the frontend should treat
+        # this as "force them to Settings > Security > Change password
+        # before letting them do anything else."
+        password_changed_at = get_password_changed_at(employee_id)
+        password_expired = is_password_expired(
+            password_changed_at, access_control.get("password_expiry_days")
+        )
+
+        return response, bool(access_control.get("require_2fa")), password_expired
 
     except HTTPException:
         raise
@@ -173,6 +188,24 @@ def change_password(
     if current_password == new_password:
         bad_request("New password must be different from your current password.")
 
+    # Enforce Access Control > Password policy (min length + require
+    # uppercase and number) rather than letting those toggles sit there
+    # doing nothing.
+    access_control = get_access_control_settings()
+
+    min_length = access_control.get("password_min_length") or 8
+    if len(new_password) < min_length:
+        bad_request(f"Password must be at least {min_length} characters.")
+
+    if access_control.get("password_require_complexity"):
+        if not (
+            any(c.isupper() for c in new_password)
+            and any(c.isdigit() for c in new_password)
+        ):
+            bad_request(
+                "Password must include at least one uppercase letter and one number."
+            )
+
     try:
 
         verify = supabase.auth.sign_in_with_password(
@@ -201,8 +234,14 @@ def change_password(
 
         raise HTTPException(status_code=500, detail=f"Could not update password: {e}")
 
-    # Best-effort audit trail — never blocks the response (see
-    # app/core/audit.py).
+    # Resets the password-expiry clock (see
+    # app/access_control/services.py::is_password_expired) and the audit
+    # trail below -- neither should block the response if either fails.
+    try:
+        touch_password_changed_at(auth_user.id)
+    except Exception:
+        pass
+
     record_audit_log(
         module="AUTH",
         action="UPDATE",

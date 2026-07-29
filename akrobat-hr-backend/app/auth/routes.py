@@ -61,7 +61,7 @@ def login(data: LoginRequest, request: Request):
 
     try:
 
-        response, mfa_required = login_user(
+        response, mfa_required, password_expired = login_user(
             data.employee_code, data.password, request=request
         )
 
@@ -70,6 +70,7 @@ def login(data: LoginRequest, request: Request):
             "refresh_token": response.session.refresh_token,
             "user_id": response.user.id,
             "mfa_required": mfa_required,
+            "password_expired": password_expired,
         }
 
     except HTTPException:

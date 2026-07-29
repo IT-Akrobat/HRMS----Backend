@@ -96,12 +96,17 @@ def get_lockout_status(employee_id: str) -> dict | None:
     return response.data if response else None
 
 
+def _parse_ts(value: str) -> datetime:
+    # Postgrest sometimes returns a trailing 'Z' instead of '+00:00';
+    # datetime.fromisoformat() only accepts the latter on Python < 3.11.
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 def is_locked(lockout_row: dict | None) -> bool:
     if not lockout_row or not lockout_row.get("locked_until"):
         return False
 
-    locked_until = datetime.fromisoformat(lockout_row["locked_until"])
-    return locked_until > datetime.now(timezone.utc)
+    return _parse_ts(lockout_row["locked_until"]) > datetime.now(timezone.utc)
 
 
 def register_failed_attempt(
@@ -173,29 +178,73 @@ def is_ip_allowed(client_ip: str | None, allowed_ranges: list[str]) -> bool:
 
 
 # =========================================================================
-# FORCE LOGOUT ALL -- revokes every admin's refresh tokens via the
-# Supabase GoTrue admin API. Done as a direct REST call (rather than
-# supabase-py's auth.admin helpers) since the "revoke all sessions for a
-# user" endpoint isn't wrapped consistently across supabase-py versions.
+# PASSWORD EXPIRY -- consumed by app/auth/services.py::login_user and
+# ::change_password. Backed by user_profiles.password_changed_at (see
+# sql/018_password_expiry_tracking.sql).
+# =========================================================================
+
+
+def get_password_changed_at(employee_id: str) -> datetime | None:
+    response = (
+        supabase_admin.table("user_profiles")
+        .select("password_changed_at")
+        .eq("employee_id", employee_id)
+        .maybe_single()
+        .execute()
+    )
+
+    if (
+        not response
+        or not response.data
+        or not response.data.get("password_changed_at")
+    ):
+        return None
+
+    return _parse_ts(response.data["password_changed_at"])
+
+
+def is_password_expired(password_changed_at: datetime | None, expiry_days: int) -> bool:
+    if not expiry_days or expiry_days <= 0:
+        return False  # 0/unset = expiry disabled
+
+    if not password_changed_at:
+        return False  # no record yet -- don't lock people out over missing data
+
+    age = datetime.now(timezone.utc) - password_changed_at
+    return age.days >= expiry_days
+
+
+def touch_password_changed_at(auth_user_id: str):
+    """Call this whenever a password is actually changed (see
+    app/auth/services.py::change_password) so the expiry clock resets."""
+
+    supabase_admin.table("user_profiles").update(
+        {"password_changed_at": datetime.now(timezone.utc).isoformat()}
+    ).eq("auth_user_id", auth_user_id).execute()
+
+
+# =========================================================================
+# FORCE LOGOUT -- revokes sessions for every non-SUPER-ADMIN account
+# (employee, HR admin, manager, team leader, etc.) via the Supabase
+# GoTrue admin API. Super Admins are deliberately excluded -- the person
+# clicking this button is a Super Admin and shouldn't sign themself, or
+# any other Super Admin, out.
 # =========================================================================
 
 
 def force_logout_all_admins() -> dict:
-    admin_roles = (
-        supabase_admin.table("roles")
-        .select("id")
-        .in_("role_name", ["SUPER ADMIN", "HR ADMIN"])
-        .execute()
-    )
-    role_ids = [r["id"] for r in (admin_roles.data or [])]
+    roles = supabase_admin.table("roles").select("id, role_name").execute()
+    target_role_ids = [
+        r["id"] for r in (roles.data or []) if r["role_name"] != "SUPER ADMIN"
+    ]
 
-    if not role_ids:
-        return {"signed_out": 0}
+    if not target_role_ids:
+        return {"signed_out": 0, "targeted": 0, "errors": []}
 
     profiles = (
         supabase_admin.table("user_profiles")
         .select("auth_user_id")
-        .in_("role_id", role_ids)
+        .in_("role_id", target_role_ids)
         .execute()
     )
     auth_user_ids = [
@@ -203,6 +252,7 @@ def force_logout_all_admins() -> dict:
     ]
 
     signed_out = 0
+    errors = []
     with httpx.Client(timeout=10) as client:
         for uid in auth_user_ids:
             try:
@@ -216,9 +266,18 @@ def force_logout_all_admins() -> dict:
                 )
                 if res.status_code < 300:
                     signed_out += 1
-            except httpx.HTTPError:
-                # Best-effort -- one unreachable/edge-case user shouldn't
-                # stop the rest of the admins from being signed out.
-                continue
+                else:
+                    # Surfaced rather than swallowed -- a silent 0/2 with
+                    # no reason is undebuggable from the frontend. Common
+                    # causes: SUPABASE_SERVICE_ROLE_KEY isn't actually the
+                    # service-role key (401), or this GoTrue version
+                    # doesn't expose this admin route the same way (404).
+                    errors.append(f"{uid}: HTTP {res.status_code} — {res.text[:200]}")
+            except httpx.HTTPError as e:
+                errors.append(f"{uid}: {e}")
 
-    return {"signed_out": signed_out, "targeted": len(auth_user_ids)}
+    return {
+        "signed_out": signed_out,
+        "targeted": len(auth_user_ids),
+        "errors": errors,
+    }
