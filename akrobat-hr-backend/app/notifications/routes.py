@@ -1,141 +1,58 @@
 from fastapi import APIRouter, Depends
 
-from app.notifications.schemas import (
-    CreateNotificationRequest,
-    UpdateNotificationRequest,
-)
-
 from app.notifications.services import (
-    create_notification,
-    get_notifications,
-    get_employee_notifications,
-    get_notification,
-    update_notification,
-    mark_as_read,
-    mark_all_as_read,
+    get_my_notifications,
+    mark_notification_read,
+    mark_all_notifications_read,
     delete_notification,
-    broadcast_notification,
 )
 
 from app.core.security import get_current_user
-from app.core.helpers.employee_helper import get_employee_id_for_auth_user
-from app.core.exceptions import forbidden
 
 router = APIRouter(prefix="/notifications", tags=["Notifications"])
 
 
 # =========================
-# CREATE NOTIFICATION
+# LIST MY NOTIFICATIONS
 # =========================
-
-
-@router.post("/")
-def create(data: CreateNotificationRequest, user=Depends(get_current_user)):
-
-    return create_notification(data)
-
-
-# =========================
-# BROADCAST TO ALL EMPLOYEES
-# =========================
-
-
-@router.post("/broadcast")
-def broadcast(data: CreateNotificationRequest, user=Depends(get_current_user)):
-
-    return broadcast_notification(data)
-
-
-# =========================
-# GET ALL NOTIFICATIONS
-# =========================
-
-
-@router.get("/")
-def all_notifications(user=Depends(get_current_user)):
-
-    return get_notifications()
-
-
-# =========================
-# MY NOTIFICATIONS
-# =========================
-# `user.id` from get_current_user is the Supabase auth user id, not the
-# employee_id the notifications table is keyed on (see notify_employee() /
-# _serialize() in services.py) — this was previously passed straight
-# through, so a logged-in employee's own notifications never matched.
 
 
 @router.get("/my")
 def my_notifications(user=Depends(get_current_user)):
 
-    employee_id = get_employee_id_for_auth_user(user.id)
-
-    if not employee_id:
-        return get_employee_notifications("00000000-0000-0000-0000-000000000000")
-
-    return get_employee_notifications(employee_id)
+    return get_my_notifications(user.id)
 
 
 # =========================
-# MARK ALL AS READ (for the caller)
+# MARK ALL AS READ
 # =========================
+# Registered before /{notification_id}/read so "my" isn't swallowed by the
+# path parameter.
 
 
 @router.put("/my/read-all")
-def read_all(user=Depends(get_current_user)):
+def read_all_notifications(user=Depends(get_current_user)):
 
-    employee_id = get_employee_id_for_auth_user(user.id)
-
-    if not employee_id:
-        forbidden("No employee profile is linked to this account.")
-
-    return mark_all_as_read(employee_id)
+    return mark_all_notifications_read(user.id)
 
 
 # =========================
-# GET SINGLE NOTIFICATION
-# =========================
-
-
-@router.get("/{notification_id}")
-def get_one(notification_id: str, user=Depends(get_current_user)):
-
-    return get_notification(notification_id)
-
-
-# =========================
-# UPDATE NOTIFICATION
-# =========================
-
-
-@router.put("/{notification_id}")
-def update(
-    notification_id: str,
-    data: UpdateNotificationRequest,
-    user=Depends(get_current_user),
-):
-
-    return update_notification(notification_id, data.model_dump(exclude_unset=True))
-
-
-# =========================
-# MARK AS READ
+# MARK ONE AS READ
 # =========================
 
 
 @router.put("/{notification_id}/read")
-def read(notification_id: str, user=Depends(get_current_user)):
+def read_notification(notification_id: str, user=Depends(get_current_user)):
 
-    return mark_as_read(notification_id)
+    return mark_notification_read(user.id, notification_id)
 
 
 # =========================
-# DELETE NOTIFICATION
+# DELETE ONE
 # =========================
 
 
 @router.delete("/{notification_id}")
-def delete(notification_id: str, user=Depends(get_current_user)):
+def remove_notification(notification_id: str, user=Depends(get_current_user)):
 
-    return delete_notification(notification_id)
+    return delete_notification(user.id, notification_id)

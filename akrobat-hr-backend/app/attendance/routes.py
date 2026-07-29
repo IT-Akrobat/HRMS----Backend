@@ -15,6 +15,7 @@ from app.attendance.schemas import (
 from app.attendance.services import (
     check_in,
     check_out,
+    get_attendance_reminder_status,
     start_break,
     end_break,
     get_my_attendance,
@@ -55,6 +56,18 @@ def employee_check_in(
     data: CheckInRequest, request: Request, user=Depends(get_current_user)
 ):
     return check_in(user.id, data, request=request)
+
+
+# Self-service "have I forgotten to check in today?" check -- polled
+# periodically by the frontend (see Header.jsx) while the employee is
+# logged in. Fires a real "ATTENDANCE_REMINDER" notification (picked up
+# by the existing NotificationBell poll/toast) the first time it detects
+# the employee is late-and-unchecked-in for the day; a no-op every other
+# time it's called. See get_attendance_reminder_status() docstring for
+# the full set of conditions.
+@router.get("/reminder-check")
+def attendance_reminder_check(user=Depends(get_current_user)):
+    return get_attendance_reminder_status(user.id)
 
 
 @router.post("/check-out")

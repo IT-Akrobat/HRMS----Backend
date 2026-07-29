@@ -2043,6 +2043,169 @@ def check_out(auth_user_id: str, data, request: Optional[Request] = None):
 
 
 # ==========================================================================
+# ATTENDANCE REMINDER (self-service "have I forgotten to check in?" check)
+# ==========================================================================
+
+
+def get_attendance_reminder_status(auth_user_id: str):
+    """
+    Self-service "have I forgotten to check in?" check.
+
+    There's no background job scheduler anywhere in this backend (no
+    APScheduler/celery/cron), so this can't run on its own at shift-start
+    time the way a real reminder system would. Instead, Header.jsx polls
+    this endpoint every few minutes while an employee is logged in (see
+    the periodic call added next to NotificationBell's existing 20s
+    /notifications/my poll) -- that's already the same "only works while
+    a session is open" constraint the rest of this app's live-notification
+    system runs under, so it's not adding a new limitation, just applying
+    the existing one here too.
+
+    Uses the exact same shift-resolution and late-minutes rules check_in()
+    uses (_get_employee_shift / _get_attendance_rule, IST-aware), so
+    "shift start" here always agrees with what a check-in would have been
+    scored against. Writes ONE "ATTENDANCE_REMINDER" notification via
+    notify_employee() once the employee is confirmed late-and-unchecked-in
+    -- deduped per employee per day so a person who leaves the tab open
+    doesn't get re-reminded every single poll. The existing NotificationBell
+    poll then picks that row up and surfaces it as a toast (+ sound +
+    browser notification if the tab isn't focused) within ~20s, same as
+    any other notification -- no separate delivery path was needed.
+
+    Silently no-ops (reminder_due: False) whenever: the "Attendance
+    reminders" preference is off (or never set -- defaults to off), there's
+    no resolved shift for today, today is a weekly off, the employee has
+    already checked in, they're on approved leave, or a reminder already
+    went out today. Never raises -- a broken check here should never
+    surface as an error to a page that's just polling in the background.
+    """
+    try:
+        employee_id = get_employee_id_for_auth_user(auth_user_id)
+        if not employee_id:
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        pref = (
+            supabase_admin.table("notification_preferences")
+            .select("attendance_reminders")
+            .eq("employee_id", employee_id)
+            .maybe_single()
+            .execute()
+        )
+        # No row yet -- matches notification_preferences DEFAULTS
+        # (attendance_reminders: False) until the employee opts in via
+        # Settings -> Notifications -> Save preferences.
+        if not pref or not pref.data or not pref.data.get("attendance_reminders"):
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        today = date.today()
+
+        # Sunday is the one day get_team_attendance_report() etc. treat as
+        # a fixed weekly off company-wide; Saturday is handled inside
+        # _get_employee_shift (falls back to a SATURDAY-named shift
+        # variant, or the weekday shift's own hours if none exists).
+        if today.weekday() == 6:
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        rule = _get_attendance_rule()
+        shift = _get_employee_shift(employee_id, today)
+        if not shift or not shift.get("start_time"):
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        hh, mm, *_ = str(shift["start_time"]).split(":")
+        scheduled_start_ist = datetime.combine(
+            today, time(int(hh), int(mm)), tzinfo=IST
+        )
+        scheduled_start = scheduled_start_ist.astimezone(timezone.utc).replace(
+            tzinfo=None
+        )
+
+        grace = shift.get("grace_period")
+        if grace is None:
+            grace = rule.get("late_grace_minutes", 0)
+
+        if _now_utc() < scheduled_start + timedelta(minutes=grace):
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        already_checked_in = (
+            supabase_admin.table("attendance")
+            .select("id")
+            .eq("employee_id", employee_id)
+            .eq("attendance_date", today.isoformat())
+            .maybe_single()
+            .execute()
+        )
+        if already_checked_in and already_checked_in.data:
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        on_leave = (
+            supabase_admin.table("leave_requests")
+            .select("id")
+            .eq("employee_id", employee_id)
+            .eq("status", "Approved")
+            .lte("start_date", today.isoformat())
+            .gte("end_date", today.isoformat())
+            .limit(1)
+            .execute()
+        )
+        if on_leave and on_leave.data:
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        day_start = datetime.combine(today, time(0, 0)).isoformat()
+        already_reminded = (
+            supabase_admin.table("notifications")
+            .select("id")
+            .eq("user_id", employee_id)
+            .eq("notification_type", "ATTENDANCE_REMINDER")
+            .gte("created_at", day_start)
+            .limit(1)
+            .execute()
+        )
+        if already_reminded and already_reminded.data:
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        shift_start_label = scheduled_start_ist.strftime("%I:%M %p").lstrip("0")
+
+        notify_employee(
+            employee_id,
+            title="Attendance reminder",
+            message=(
+                f"You haven't checked in yet — your shift started at "
+                f"{shift_start_label}."
+            ),
+            notification_type="ATTENDANCE_REMINDER",
+        )
+
+        return success_response(
+            message="Reminder sent.",
+            data={"reminder_due": True, "shift_start": shift_start_label},
+        )
+
+    except Exception as e:
+        # Best-effort background check -- never let this bubble up as a
+        # 500 to a page that's just polling.
+        logger.error(f"Attendance reminder check failed for {auth_user_id}: {e}")
+        return success_response(
+            message="No reminder due.", data={"reminder_due": False}
+        )
+
+
+# ==========================================================================
 # BREAKS (multiple breaks per day)
 # ==========================================================================
 
