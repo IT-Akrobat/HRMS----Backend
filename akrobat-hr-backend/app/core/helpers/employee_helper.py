@@ -198,6 +198,28 @@ def get_email_for_employee_code(employee_code: str) -> str | None:
     return response.data.get("email")
 
 
+def get_employee_by_code(employee_code: str) -> dict | None:
+    """Same lookup as get_email_for_employee_code, but also returns the
+    employees.id -- needed by login_user to key the login_lockouts table
+    (see app/access_control/services.py)."""
+
+    if not employee_code:
+        return None
+
+    response = (
+        supabase_admin.table("employees")
+        .select("id, email")
+        .eq("employee_id", employee_code.strip().upper())
+        .maybe_single()
+        .execute()
+    )
+
+    if not response or not response.data:
+        return None
+
+    return response.data
+
+
 # ==========================================
 # VALIDATE COMPANY EMAIL
 # ==========================================

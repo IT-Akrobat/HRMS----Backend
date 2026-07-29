@@ -143,60 +143,6 @@
 #             "designation": designation,
 #         },
 #     }
-from fastapi import HTTPException, Request
-
-from app.core.audit import record_audit_log
-from app.core.database import supabase_admin
-from app.core.exceptions import bad_request, forbidden, unauthorized
-from app.core.database import supabase
-from app.core.helpers.employee_helper import get_email_for_employee_code
-from app.core.rbac import get_permissions_for_role
-from app.core.sidebar import build_sidebar
-
-
-def login_user(employee_code: str, password: str, request: Request = None):
-
-    # Supabase Auth authenticates by email under the hood, so the
-    # employee code typed into the login form is first resolved to the
-    # email on file for that employee (see
-    # app/core/helpers/employee_helper.get_email_for_employee_code).
-    # An unknown code gets the exact same "Invalid credentials" error as
-    # a wrong password, so login never reveals whether a given employee
-    # code exists.
-    email = get_email_for_employee_code(employee_code)
-
-    if not email:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    try:
-
-        response = supabase.auth.sign_in_with_password(
-            {"email": email, "password": password}
-        )
-
-        if not response.session:
-
-            raise HTTPException(status_code=401, detail="Invalid credentials")
-
-        # Best-effort login audit trail (never blocks the response — see
-        # app/core/audit.py). performed_by is the Supabase auth user id;
-        # record_audit_log resolves it to an employees.id internally.
-        record_audit_log(
-            module="AUTH",
-            action="LOGIN",
-            performed_by=response.user.id if response.user else None,
-            description=f"Login: {employee_code}",
-            request=request,
-        )
-
-        return response
-
-    except HTTPException:
-        raise
-
-    except Exception:
-
-        raise HTTPException(status_code=401, detail="Invalid credentials")
 
 
 # ==========================================
@@ -588,28 +534,67 @@ def get_me(auth_user) -> dict:
 #     }
 from fastapi import HTTPException, Request
 
+from app.access_control.services import (
+    get_access_control_settings,
+    get_lockout_status,
+    is_ip_allowed,
+    is_locked,
+    register_failed_attempt,
+    reset_lockout,
+)
 from app.core.audit import record_audit_log
 from app.core.database import supabase_admin
 from app.core.exceptions import bad_request, forbidden, unauthorized
 from app.core.database import supabase
-from app.core.helpers.employee_helper import get_email_for_employee_code
+from app.core.helpers.employee_helper import get_employee_by_code
 from app.core.rbac import get_permissions_for_role
 from app.core.sidebar import build_sidebar
+
+
+def _client_ip(request: Request | None) -> str | None:
+    if not request:
+        return None
+    # Behind a proxy/load balancer the real client IP is the first hop
+    # in X-Forwarded-For; fall back to the direct connection otherwise.
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else None
 
 
 def login_user(employee_code: str, password: str, request: Request = None):
 
     # Supabase Auth authenticates by email under the hood, so the
     # employee code typed into the login form is first resolved to the
-    # email on file for that employee (see
-    # app/core/helpers/employee_helper.get_email_for_employee_code).
-    # An unknown code gets the exact same "Invalid credentials" error as
-    # a wrong password, so login never reveals whether a given employee
-    # code exists.
-    email = get_email_for_employee_code(employee_code)
+    # email + id on file for that employee (see
+    # app/core/helpers/employee_helper.get_employee_by_code). An unknown
+    # code gets the exact same "Invalid credentials" error as a wrong
+    # password, so login never reveals whether a given employee code
+    # exists.
+    employee = get_employee_by_code(employee_code)
 
-    if not email:
+    if not employee:
         raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    email = employee["email"]
+    employee_id = employee["id"]
+
+    access_control = get_access_control_settings()
+
+    # --- IP allowlist ---------------------------------------------------
+    if access_control.get("restrict_to_office"):
+        if not is_ip_allowed(
+            _client_ip(request), access_control.get("allowed_ip_ranges") or []
+        ):
+            forbidden("This account can only sign in from the office network.")
+
+    # --- Account lockout -------------------------------------------------
+    lockout_row = get_lockout_status(employee_id)
+    if is_locked(lockout_row):
+        raise HTTPException(
+            status_code=423,
+            detail="Too many failed attempts. This account is temporarily locked -- try again later.",
+        )
 
     try:
 
@@ -619,7 +604,15 @@ def login_user(employee_code: str, password: str, request: Request = None):
 
         if not response.session:
 
+            register_failed_attempt(
+                employee_id,
+                access_control.get("lockout_attempts", 5),
+                access_control.get("lockout_duration_minutes", 15),
+            )
             raise HTTPException(status_code=401, detail="Invalid credentials")
+
+        # Successful sign-in clears any prior failed-attempt count.
+        reset_lockout(employee_id)
 
         # Best-effort login audit trail (never blocks the response — see
         # app/core/audit.py). performed_by is the Supabase auth user id;
@@ -632,13 +625,25 @@ def login_user(employee_code: str, password: str, request: Request = None):
             request=request,
         )
 
-        return response
+        # require_2fa is surfaced as a second return value rather than an
+        # attribute stuck onto `response` -- it's a Pydantic model from
+        # supabase-py and may reject an attribute it doesn't declare. An
+        # OTP challenge step (email/SMS/authenticator code) needs its own
+        # delivery + verification endpoint, which isn't built yet; the
+        # frontend can use this flag to show a "verification required"
+        # state ahead of that landing.
+        return response, bool(access_control.get("require_2fa"))
 
     except HTTPException:
         raise
 
     except Exception:
 
+        register_failed_attempt(
+            employee_id,
+            access_control.get("lockout_attempts", 5),
+            access_control.get("lockout_duration_minutes", 15),
+        )
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
 

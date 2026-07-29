@@ -61,12 +61,15 @@ def login(data: LoginRequest, request: Request):
 
     try:
 
-        response = login_user(data.employee_code, data.password, request=request)
+        response, mfa_required = login_user(
+            data.employee_code, data.password, request=request
+        )
 
         return {
             "access_token": response.session.access_token,
             "refresh_token": response.session.refresh_token,
             "user_id": response.user.id,
+            "mfa_required": mfa_required,
         }
 
     except HTTPException:

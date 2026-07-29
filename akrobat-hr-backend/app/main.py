@@ -50,6 +50,7 @@ from app.notifications.routes import router as notification_router
 from app.announcements.routes import router as announcement_router
 from app.reports.routes import router as report_router
 from app.settings.routes import router as settings_router
+from app.access_control.routes import router as access_control_router
 from app.expenses.routes import router as expense_router
 
 from app.audit_logs.routes import router as audit_log_router
@@ -73,7 +74,12 @@ app.add_middleware(
 
 @app.get("/", tags=["Health"])
 def root():
-    return {"status": "ok", "app": APP_NAME, "version": APP_VERSION, "environment": ENVIRONMENT}
+    return {
+        "status": "ok",
+        "app": APP_NAME,
+        "version": APP_VERSION,
+        "environment": ENVIRONMENT,
+    }
 
 
 @app.get("/health", tags=["Health"])
@@ -83,6 +89,7 @@ def health():
     # transient upstream blip. Add a separate /health/db check if you want
     # DB connectivity verified explicitly.
     return {"status": "healthy"}
+
 
 app.add_exception_handler(HTTPException, http_exception_handler)
 
@@ -120,6 +127,7 @@ app.include_router(announcement_router)
 
 app.include_router(report_router)
 app.include_router(settings_router)
+app.include_router(access_control_router)
 
 app.include_router(expense_router)
 app.include_router(audit_log_router)
