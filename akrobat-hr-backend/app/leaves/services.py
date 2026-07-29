@@ -17,6 +17,7 @@ from app.core.helpers.employee_helper import (
 from app.core.constants import ADMIN
 from app.core.database import supabase_admin
 from app.notifications.services import notify_employee
+from app.notification_preferences.services import get_preference
 
 leave_repo = SupabaseRepository("leave_requests")
 leave_type_repo = SupabaseRepository("leave_types")
@@ -315,17 +316,22 @@ def update_leave_status(
         leave_type_name = (
             leave_type_row.get("leave_name") if leave_type_row else "Leave"
         )
-        notify_employee(
-            target_employee_id,
-            title=f"Leave {data.status}",
-            message=(
-                f"Your {leave_type_name.title()} request "
-                f"({existing.get('start_date')} to {existing.get('end_date')}) "
-                f"has been {data.status.lower()}"
-                + (f" — {data.comments}" if data.comments else ".")
-            ),
-            notification_type="LEAVE",
-        )
+        # Gated by the employee's own "Leave request updates" toggle
+        # (Settings > Notifications) -- this is the exact "your leave was
+        # approved/rejected/commented on" case that toggle describes.
+        # Defaults to on for anyone who hasn't saved preferences yet.
+        if get_preference(target_employee_id, "leave_updates"):
+            notify_employee(
+                target_employee_id,
+                title=f"Leave {data.status}",
+                message=(
+                    f"Your {leave_type_name.title()} request "
+                    f"({existing.get('start_date')} to {existing.get('end_date')}) "
+                    f"has been {data.status.lower()}"
+                    + (f" — {data.comments}" if data.comments else ".")
+                ),
+                notification_type="LEAVE",
+            )
 
         message = LEAVE_APPROVED if data.status == "Approved" else LEAVE_REJECTED
 

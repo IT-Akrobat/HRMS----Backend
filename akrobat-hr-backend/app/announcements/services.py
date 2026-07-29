@@ -4,6 +4,9 @@ from fastapi import HTTPException
 
 from app.core.database import supabase_admin
 from app.core.responses import success_response
+from app.core.logger import logger
+from app.notifications.services import notify_employee
+from app.notification_preferences.services import get_preference
 
 # Every other module in this app returns { success, message, data } (see
 # app/core/responses.py -> success_response, and app/holidays/services.py
@@ -58,9 +61,40 @@ def create_announcement(data, user_id: str):
             .execute()
         )
 
+        created = response.data[0]
+
+        # Best-effort fan-out: notify every active employee that a new
+        # company-wide announcement went out, EXCEPT anyone who has
+        # switched "Announcements" off under Settings > Notifications
+        # (get_preference() defaults to on for anyone who's never saved
+        # preferences, matching NOTIF_DEFAULTS). Deliberately wrapped so a
+        # broken notify pass never fails the announcement creation itself
+        # -- same pattern as every other notify_employee() call site.
+        try:
+            employees = (
+                supabase_admin.table("employees")
+                .select("id")
+                .eq("employment_status", "Active")
+                .execute()
+            )
+            for row in employees.data or []:
+                employee_id = row.get("id")
+                if not employee_id or employee_id == user_id:
+                    continue
+                if not get_preference(employee_id, "announcements"):
+                    continue
+                notify_employee(
+                    employee_id,
+                    title=data.title,
+                    message=data.description,
+                    notification_type="ANNOUNCEMENT",
+                )
+        except Exception as e:
+            logger.error(f"Failed to fan out announcement notifications: {e}")
+
         return success_response(
             "Announcement created successfully",
-            data=_row_to_api(response.data[0]),
+            data=_row_to_api(created),
         )
 
     except Exception as e:

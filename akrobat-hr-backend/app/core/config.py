@@ -49,6 +49,22 @@ ALLOWED_ORIGINS = [
 # Public, keyless random-quote API. Swap via env if it ever goes down.
 QUOTE_API_URL = os.getenv("QUOTE_API_URL", "https://zenquotes.io/api/random")
 
+# ---------------------------------------------------------------------
+# SMTP (see app/core/email.py, used by app/notifications "Email
+# notifications" preference)
+# ---------------------------------------------------------------------
+# Entirely optional -- same degrade-gracefully pattern as QUOTE_API_URL.
+# If SMTP_HOST isn't set, email.send_email() just logs and no-ops instead
+# of raising, so a notification insert never fails because email wasn't
+# configured yet.
+
+SMTP_HOST = os.getenv("SMTP_HOST")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USERNAME = os.getenv("SMTP_USERNAME")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", SMTP_USERNAME)
+SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() in ("1", "true", "yes")
+
 # Pexels image search (https://www.pexels.com/api/) — free API key.
 # Background images fall back to a curated static list when unset.
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")

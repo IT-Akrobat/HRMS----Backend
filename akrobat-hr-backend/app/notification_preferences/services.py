@@ -41,6 +41,50 @@ def _resolve_employee_id(auth_user_id: str) -> str:
 
 
 # =========================
+# CHECK A SINGLE PREFERENCE
+# =========================
+#
+# Used by other modules (leaves, announcements, notify_employee's email
+# hook, ...) to decide whether a given employee should actually receive a
+# particular kind of notification, e.g.:
+#   if get_preference(target_employee_id, "leave_updates"):
+#       notify_employee(...)
+#
+# Takes an EMPLOYEE id directly (not an auth user id) since that's what
+# notify_employee() and its callers already have on hand. Falls back to
+# DEFAULTS for anyone who's never saved preferences (same default-on/off
+# behavior as get_my_preferences), and fails "open" (returns the default)
+# on any lookup error so a broken preferences read never silently
+# swallows a notification that should have gone out.
+
+
+def get_preference(employee_id: str | None, key: str) -> bool:
+    if not employee_id:
+        return False
+
+    default = bool(DEFAULTS.get(key, True))
+
+    try:
+        response = (
+            supabase_admin.table("notification_preferences")
+            .select(key)
+            .eq("employee_id", employee_id)
+            .maybe_single()
+            .execute()
+        )
+        if response and response.data and response.data.get(key) is not None:
+            return bool(response.data[key])
+        return default
+
+    except Exception as e:
+        logger.error(
+            f"Failed to read notification preference '{key}' for "
+            f"{employee_id}, defaulting to {default}: {e}"
+        )
+        return default
+
+
+# =========================
 # GET MY PREFERENCES
 # =========================
 

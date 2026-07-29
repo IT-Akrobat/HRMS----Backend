@@ -5,6 +5,7 @@ from app.notifications.services import (
     mark_notification_read,
     mark_all_notifications_read,
     delete_notification,
+    get_celebrations_status,
 )
 
 from app.core.security import get_current_user
@@ -21,6 +22,21 @@ router = APIRouter(prefix="/notifications", tags=["Notifications"])
 def my_notifications(user=Depends(get_current_user)):
 
     return get_my_notifications(user.id)
+
+
+# =========================
+# CHECK FOR CELEBRATIONS
+# =========================
+# Polled by the frontend (e.g. alongside the existing /notifications/my
+# poll in Header.jsx) to surface today's birthdays/work anniversaries as
+# a real notification, gated by the requesting employee's own
+# "Birthdays & work anniversaries" toggle.
+
+
+@router.get("/celebrations-check")
+def celebrations_check(user=Depends(get_current_user)):
+
+    return get_celebrations_status(user.id)
 
 
 # =========================
