@@ -420,7 +420,9 @@ def employee_full_report(employee_id: str):
         # location — "how many sites worked" and "how long at each".
         visits_resp = (
             supabase_admin.table("attendance_site_visits")
-            .select("location_id, duration_minutes, locations(location_name)")
+            .select(
+                "location_id, duration_minutes, arrival_time, locations(location_name)"
+            )
             .eq("employee_id", employee_id)
             .execute()
         )
@@ -441,6 +443,58 @@ def employee_full_report(employee_id: str):
 
         sites_worked = sorted(sites_by_id.values(), key=lambda s: -s["total_minutes"])
 
+        # Same visits, bucketed by calendar month ("2026-07") and by year
+        # ("2026") instead of by site — "how many distinct sites did they
+        # work in this month/year, and for how long" (arrival_time's date
+        # is what a visit is attributed to, same as the site breakdown
+        # above uses duration regardless of whether it spans midnight).
+        monthly_by_key = {}
+        yearly_by_key = {}
+        for v in visits:
+            arrival = v.get("arrival_time")
+            if not arrival:
+                continue
+            month_key = arrival[:7]  # "2026-07-15T09:00:00" -> "2026-07"
+            year_key = arrival[:4]  # -> "2026"
+            loc_id = v.get("location_id") or "unknown"
+            loc_name = (v.get("locations") or {}).get("location_name") or "Unknown Site"
+            minutes = v.get("duration_minutes") or 0
+
+            for bucket_by_key, key in (
+                (monthly_by_key, month_key),
+                (yearly_by_key, year_key),
+            ):
+                bucket = bucket_by_key.setdefault(
+                    key, {"period": key, "sites": {}, "total_minutes": 0}
+                )
+                bucket["total_minutes"] += minutes
+                site_entry = bucket["sites"].setdefault(
+                    loc_id,
+                    {"location_name": loc_name, "visit_count": 0, "total_minutes": 0},
+                )
+                site_entry["visit_count"] += 1
+                site_entry["total_minutes"] += minutes
+
+        def _finalize_periods(bucket_by_key):
+            periods = []
+            for key in sorted(bucket_by_key.keys()):
+                b = bucket_by_key[key]
+                site_list = sorted(
+                    b["sites"].values(), key=lambda s: -s["total_minutes"]
+                )
+                periods.append(
+                    {
+                        "period": b["period"],
+                        "distinct_site_count": len(site_list),
+                        "site_names": [s["location_name"] for s in site_list],
+                        "total_minutes": b["total_minutes"],
+                    }
+                )
+            return periods
+
+        monthly_sites = _finalize_periods(monthly_by_key)
+        yearly_sites = _finalize_periods(yearly_by_key)
+
         # Lifetime attendance totals.
         attendance_resp = (
             supabase_admin.table("attendance")
@@ -458,6 +512,8 @@ def employee_full_report(employee_id: str):
             "sites_worked": sites_worked,
             "distinct_site_count": len(sites_worked),
             "total_site_visit_minutes": sum(s["total_minutes"] for s in sites_worked),
+            "monthly_sites": monthly_sites,
+            "yearly_sites": yearly_sites,
             "attendance_summary": {
                 "total_days_recorded": len(attendance_rows),
                 "present_days": sum(
