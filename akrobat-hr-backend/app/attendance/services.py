@@ -1713,6 +1713,16 @@ def _format_duration_minutes(minutes) -> str:
 def _validate_geofence(
     location_id: Optional[str], latitude: Optional[float], longitude: Optional[float]
 ):
+    """
+    Real, DB-driven geofence check — nothing here is hardcoded. It looks up
+    the given location_id's lat/long/radius from the `locations` table at
+    call time, so if a site's coordinates or radius change in the DB, this
+    always uses the current values. Used by site visits (arrive_at_site),
+    where staying within a client site's configured radius still matters.
+
+    check_in intentionally does NOT call this (see check_in below) — daily
+    attendance check-in is allowed from wherever the employee actually is.
+    """
     if not location_id or latitude is None or longitude is None:
         return
 
@@ -1840,12 +1850,12 @@ def check_in(auth_user_id: str, data, request: Optional[Request] = None):
 
         # Daily attendance check-in is intentionally NOT restricted to a
         # manager-assigned site — "did you show up for work today" can
-        # happen from any configured company location. The assigned-site
-        # restriction is specific to Site Visits (arrive_at_site), which
-        # tracks *which client site* a field employee is at during the
-        # day. Only the geofence (must be near *some* configured
-        # location) still applies here.
-        _validate_geofence(data.location_id, data.latitude, data.longitude)
+        # happen from any configured company location. It also does NOT
+        # enforce the geofence (unlike Site Visits / arrive_at_site below,
+        # which still calls _validate_geofence) — check-in is allowed from
+        # wherever the employee actually is. We still store the real GPS
+        # fix (data.latitude/data.longitude) on the attendance row below,
+        # so there's an honest record of where the check-in happened.
 
         check_in_time = _now_utc()
         shift = _get_employee_shift(employee_id, today)

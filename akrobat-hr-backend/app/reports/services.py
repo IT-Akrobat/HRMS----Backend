@@ -421,7 +421,7 @@ def employee_full_report(employee_id: str):
         visits_resp = (
             supabase_admin.table("attendance_site_visits")
             .select(
-                "location_id, duration_minutes, arrival_time, locations(location_name)"
+                "location_id, duration_minutes, arrival_time, locations(location_name, address)"
             )
             .eq("employee_id", employee_id)
             .execute()
@@ -431,17 +431,32 @@ def employee_full_report(employee_id: str):
         sites_by_id = {}
         for v in visits:
             loc_id = v.get("location_id") or "unknown"
-            loc_name = (v.get("locations") or {}).get("location_name") or "Unknown Site"
+            loc = v.get("locations") or {}
+            loc_name = loc.get("location_name") or "Unknown Site"
+            loc_address = loc.get("address") or "—"
             entry = sites_by_id.setdefault(
                 loc_id,
-                {"location_name": loc_name, "visit_count": 0, "total_minutes": 0},
+                {
+                    "location_name": loc_name,
+                    "location_address": loc_address,
+                    "visit_count": 0,
+                    "total_minutes": 0,
+                    "dates_worked": set(),
+                },
             )
             entry["visit_count"] += 1
             # Still-open visits (no departure yet) have duration_minutes =
             # null — counted as a visit, contributes 0 minutes until closed.
             entry["total_minutes"] += v.get("duration_minutes") or 0
+            # arrival_time looks like "2026-07-15T09:00:00" — just the date
+            # part is what "which day did they work this site" means here.
+            arrival = v.get("arrival_time")
+            if arrival:
+                entry["dates_worked"].add(arrival[:10])
 
         sites_worked = sorted(sites_by_id.values(), key=lambda s: -s["total_minutes"])
+        for s in sites_worked:
+            s["dates_worked"] = sorted(s["dates_worked"])
 
         # Same visits, bucketed by calendar month ("2026-07") and by year
         # ("2026") instead of by site — "how many distinct sites did they
