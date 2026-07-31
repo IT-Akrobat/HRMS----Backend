@@ -2552,6 +2552,138 @@ def depart_site(auth_user_id: str, data, request: Optional[Request] = None):
         internal_server_error("Unable to log site departure.")
 
 
+# How far (in meters) an open site visit's live ping can drift from the
+# site's configured lat/lon before it's flagged as "left the site" and a
+# manager/super-admin notification fires. Deliberately separate from a
+# location's own `radius` (used by _validate_geofence at check-in time,
+# and typically tighter — e.g. 300m for "were you here when you arrived")
+# — this is a looser "did they wander off after arriving" threshold.
+ALERT_RADIUS_M = 500
+
+
+def ping_site_visit(auth_user_id: str, data, request: Optional[Request] = None):
+    """
+    Live presence check for an open site visit — called every ~60s by the
+    frontend (see SiteVisitCard.jsx) while the employee has an active
+    "Arrived" with no "Departed" yet. Records where they are right now,
+    and — the first time a ping lands more than ALERT_RADIUS_M from the
+    site — notifies their manager and every SUPER ADMIN with the
+    distance, so someone can act instead of the app silently keeping a
+    stale "on site" status all day.
+
+    Deliberately quiet (no error) if there's no open visit right now —
+    the frontend only calls this while it believes one is open, but a
+    race (e.g. they just tapped Departed on another tab) shouldn't spam
+    an error toast every minute.
+    """
+    try:
+        employee_id = get_employee_id_for_auth_user(auth_user_id)
+        if not employee_id:
+            return success_response(message="No employee profile linked.", data=None)
+
+        open_visit = (
+            supabase_admin.table("attendance_site_visits")
+            .select("*, locations(location_name, latitude, longitude)")
+            .eq("employee_id", employee_id)
+            .is_("departure_time", "null")
+            .order("arrival_time", desc=True)
+            .limit(1)
+            .maybe_single()
+            .execute()
+        )
+        visit = open_visit.data if open_visit else None
+        if not visit:
+            return success_response(message="No open site visit.", data=None)
+
+        loc = visit.get("locations") or {}
+        site_lat, site_lng = loc.get("latitude"), loc.get("longitude")
+
+        update_payload = {
+            "last_ping_latitude": data.latitude,
+            "last_ping_longitude": data.longitude,
+            "last_ping_at": _now_utc().isoformat(),
+        }
+
+        distance_m = None
+        was_outside = bool(visit.get("is_outside_radius"))
+        is_now_outside = False
+
+        if site_lat is not None and site_lng is not None:
+            distance_m = _haversine_meters(
+                data.latitude, data.longitude, site_lat, site_lng
+            )
+            is_now_outside = distance_m > ALERT_RADIUS_M
+            update_payload["last_ping_distance_m"] = distance_m
+            update_payload["is_outside_radius"] = is_now_outside
+
+        supabase_admin.table("attendance_site_visits").update(update_payload).eq(
+            "id", visit["id"]
+        ).execute()
+
+        # Edge-triggered: only notify the moment this flips from inside to
+        # outside range, not on every ping while it stays outside — and
+        # not on the way back in (a returning-then-leaving-again employee
+        # will re-trigger it, since is_now_outside just went False then
+        # will go True again on a later ping).
+        if is_now_outside and not was_outside:
+            employee = (
+                supabase_admin.table("employees")
+                .select("full_name, manager_id")
+                .eq("id", employee_id)
+                .maybe_single()
+                .execute()
+            )
+            employee_data = employee.data if employee else None
+            employee_name = (employee_data or {}).get("full_name", "An employee")
+            manager_id = (employee_data or {}).get("manager_id")
+            site_name = loc.get("location_name", "the site")
+
+            message = (
+                f"{employee_name} has moved {int(distance_m)}m away from "
+                f"{site_name} (allowed {ALERT_RADIUS_M}m) while still marked "
+                "on site."
+            )
+
+            recipient_ids = set(get_employee_ids_for_role(ADMIN))
+            if manager_id:
+                recipient_ids.add(manager_id)
+            recipient_ids.discard(employee_id)
+
+            for recipient_id in recipient_ids:
+                notify_employee(
+                    recipient_id,
+                    title="Employee left site area",
+                    message=message,
+                    notification_type="ATTENDANCE",
+                )
+
+            record_audit_log(
+                module="ATTENDANCE",
+                action="SITE_VISIT_OUT_OF_RANGE",
+                performed_by=auth_user_id,
+                target_employee_id=employee_id,
+                record_id=visit["id"],
+                description=message,
+                request=request,
+            )
+
+        return success_response(
+            message="Presence ping recorded.",
+            data={
+                "distance_m": distance_m,
+                "outside_radius": is_now_outside,
+                "alert_radius_m": ALERT_RADIUS_M,
+            },
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception(e)
+        internal_server_error("Unable to record presence ping.")
+
+
 def _effective_visit_minutes(visit: dict) -> int:
     """
     Minutes spent on this visit *as of right now*.
@@ -2744,6 +2876,16 @@ def get_team_site_visits_today(auth_user_id: str):
             else:
                 live_status = "checked_in_no_site"
 
+            # Prefer the latest 1-min presence ping over the arrival point
+            # frozen at "Arrived" time — that's what actually tells you
+            # where they are *right now*, not just where they started.
+            current_lat = (open_visit or {}).get("last_ping_latitude") or (
+                open_visit or {}
+            ).get("arrival_latitude")
+            current_lng = (open_visit or {}).get("last_ping_longitude") or (
+                open_visit or {}
+            ).get("arrival_longitude")
+
             results.append(
                 {
                     "employee_id": employee_id,
@@ -2751,6 +2893,15 @@ def get_team_site_visits_today(auth_user_id: str):
                     "live_status": live_status,
                     "current_site": (open_visit or {}).get("locations"),
                     "current_site_since": (open_visit or {}).get("arrival_time"),
+                    "current_latitude": current_lat,
+                    "current_longitude": current_lng,
+                    "last_ping_at": (open_visit or {}).get("last_ping_at"),
+                    "last_ping_distance_m": (open_visit or {}).get(
+                        "last_ping_distance_m"
+                    ),
+                    "is_outside_radius": bool(
+                        (open_visit or {}).get("is_outside_radius")
+                    ),
                     "check_in_time": (attendance or {}).get("check_in_time"),
                     "check_out_time": (attendance or {}).get("check_out_time"),
                     "sites_visited_today": len(
@@ -2861,8 +3012,16 @@ def get_org_site_visits_today(auth_user_id: str):
             # otherwise nothing to plot.
             last_visit = visits[-1] if visits else None
             if open_visit:
-                current_lat = open_visit.get("arrival_latitude")
-                current_lng = open_visit.get("arrival_longitude")
+                # Prefer the latest 1-min presence ping (see
+                # ping_site_visit) over the point captured once at
+                # "Arrived" — that's what actually tells you where they
+                # are right now, not just where they started.
+                current_lat = open_visit.get("last_ping_latitude") or open_visit.get(
+                    "arrival_latitude"
+                )
+                current_lng = open_visit.get("last_ping_longitude") or open_visit.get(
+                    "arrival_longitude"
+                )
             elif last_visit:
                 current_lat = last_visit.get("departure_latitude")
                 current_lng = last_visit.get("departure_longitude")
@@ -2878,6 +3037,13 @@ def get_org_site_visits_today(auth_user_id: str):
                     "current_site_since": (open_visit or {}).get("arrival_time"),
                     "current_latitude": current_lat,
                     "current_longitude": current_lng,
+                    "last_ping_at": (open_visit or {}).get("last_ping_at"),
+                    "last_ping_distance_m": (open_visit or {}).get(
+                        "last_ping_distance_m"
+                    ),
+                    "is_outside_radius": bool(
+                        (open_visit or {}).get("is_outside_radius")
+                    ),
                     "check_in_time": (attendance or {}).get("check_in_time"),
                     "check_out_time": (attendance or {}).get("check_out_time"),
                     "sites_visited_today": len(

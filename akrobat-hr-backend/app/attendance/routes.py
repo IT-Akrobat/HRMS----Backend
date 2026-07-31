@@ -10,6 +10,7 @@ from app.attendance.schemas import (
     AdminUpdateAttendanceRequest,
     SiteVisitArriveRequest,
     SiteVisitDepartRequest,
+    SiteVisitPingRequest,
 )
 
 from app.attendance.services import (
@@ -32,6 +33,7 @@ from app.attendance.services import (
     admin_update_attendance,
     arrive_at_site,
     depart_site,
+    ping_site_visit,
     get_site_visits_for_attendance,
     get_my_site_visits_today,
     get_team_site_visits_today,
@@ -104,6 +106,14 @@ def site_visit_depart(
     data: SiteVisitDepartRequest, request: Request, user=Depends(get_current_user)
 ):
     return depart_site(user.id, data, request=request)
+
+
+@router.post("/site-visit/ping")
+def site_visit_ping(
+    data: SiteVisitPingRequest, request: Request, user=Depends(get_current_user)
+):
+    """Live presence check, fired every ~60s by the frontend while a site visit is open."""
+    return ping_site_visit(user.id, data, request=request)
 
 
 @router.get("/site-visit/today")

@@ -72,3 +72,18 @@ class SiteVisitDepartRequest(BaseModel):
     longitude: Optional[float] = None
 
     notes: Optional[str] = None
+
+
+class SiteVisitPingRequest(BaseModel):
+    """
+    Fired every ~60s by the frontend while a site visit is open (see
+    SiteVisitCard.jsx), so the employee's presence at the site can be
+    verified continuously instead of only once at arrival. Unlike
+    arrive/depart, latitude/longitude are required here — a ping with no
+    coordinates can't verify anything, so the frontend simply skips
+    sending one for that cycle if it doesn't have a fresh GPS fix yet.
+    """
+
+    latitude: float
+
+    longitude: float
