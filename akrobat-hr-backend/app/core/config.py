@@ -71,3 +71,14 @@ PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 PEXELS_SEARCH_QUERY = os.getenv(
     "PEXELS_SEARCH_QUERY", "workplace safety construction teamwork"
 )
+
+# ---------------------------------------------------------------------
+# OneMap Singapore (see app/locations/onemap_service.py)
+# ---------------------------------------------------------------------
+# Free account at https://www.onemap.gov.sg/apidocs/register. Optional
+# and read with os.getenv (not get_env()) — same degrade-gracefully
+# pattern as Pexels above: if unset, reverse-geocode requests for
+# Singapore coordinates just fall back to OpenStreetMap on the
+# frontend instead of the app failing to start.
+ONEMAP_EMAIL = os.getenv("ONEMAP_EMAIL")
+ONEMAP_PASSWORD = os.getenv("ONEMAP_PASSWORD")
