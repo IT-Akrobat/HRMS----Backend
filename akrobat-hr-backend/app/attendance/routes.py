@@ -27,6 +27,7 @@ from app.attendance.services import (
     decide_regularization,
     get_team_attendance,
     get_team_attendance_report,
+    get_org_attendance_report,
     get_all_attendance,
     get_employee_attendance,
     get_attendance_analytics,
@@ -259,6 +260,29 @@ def attendance_analytics(
     user=Depends(require_permission("VIEW_ALL_ATTENDANCE")),
 ):
     return get_attendance_analytics(from_date, to_date)
+
+
+# NEW: powers src/pages/hr-admin/AttendanceReports.jsx — org-wide, with
+# optional department/employee/status filters. See
+# get_org_attendance_report() docstring in services.py for the shape of
+# the response ("employees" summary rows + "daily_records" for the log
+# table and CSV export).
+@router.get("/org/report")
+def org_attendance_report(
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    department_id: str | None = Query(None),
+    employee_id: str | None = Query(None),
+    status: str | None = Query(None),
+    user=Depends(require_permission("VIEW_ALL_ATTENDANCE")),
+):
+    return get_org_attendance_report(
+        from_date=from_date,
+        to_date=to_date,
+        department_id=department_id,
+        employee_id=employee_id,
+        status=status,
+    )
 
 
 @router.get("/employee/{employee_id}")

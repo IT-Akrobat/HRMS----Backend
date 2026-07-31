@@ -3804,6 +3804,193 @@ def _daterange(start: date, end: date):
         yield start + timedelta(days=offset)
 
 
+# NEW: powers the HR-facing Attendance Reports page
+# (src/pages/hr-admin/AttendanceReports.jsx) — GET /attendance/org/report.
+#
+# Unlike get_team_attendance_report() above (scoped to one manager's
+# reports), this covers the whole organization and is gated on
+# VIEW_ALL_ATTENDANCE. Optional department_id/employee_id/status let the
+# frontend's filter bar narrow the result without re-fetching everything.
+#
+# Returns both:
+#  - "employees": one summary row per employee (present/absent/late/leave
+#    counts + attendance %) — used for the "By employee" / "By department"
+#    views and the per-employee CSV export.
+#  - "daily_records": one row per employee per working day in range — used
+#    for the "Daily log" table and the "export everything" CSV, since that
+#    needs actual check-in/check-out times, not just the summary counts.
+def get_org_attendance_report(
+    from_date: date,
+    to_date: date,
+    department_id: Optional[str] = None,
+    employee_id: Optional[str] = None,
+    status: Optional[str] = None,
+):
+    try:
+        roster_query = supabase_admin.table("employees").select(
+            "id, employee_id, full_name, profile_photo, department_id, "
+            "departments!employees_department_id_fkey(department_name), "
+            "designations(designation_name)"
+        )
+        if department_id:
+            roster_query = roster_query.eq("department_id", department_id)
+        if employee_id:
+            roster_query = roster_query.eq("id", employee_id)
+
+        roster = (roster_query.order("full_name").execute()).data or []
+
+        if not roster:
+            return success_response(
+                message="Attendance report fetched successfully.",
+                data={
+                    "from_date": from_date.isoformat(),
+                    "to_date": to_date.isoformat(),
+                    "employees": [],
+                    "daily_records": [],
+                },
+            )
+
+        roster_ids = [emp["id"] for emp in roster]
+        roster_by_id = {emp["id"]: emp for emp in roster}
+
+        attendance_resp = (
+            supabase_admin.table("attendance")
+            .select(
+                "employee_id, attendance_date, status, check_in_time, "
+                "check_out_time, late_minutes, working_minutes, "
+                "overtime_minutes"
+            )
+            .in_("employee_id", roster_ids)
+            .gte("attendance_date", from_date.isoformat())
+            .lte("attendance_date", to_date.isoformat())
+            .execute()
+        )
+        attendance_rows = attendance_resp.data or []
+
+        leave_resp = (
+            supabase_admin.table("leave_requests")
+            .select("employee_id, start_date, end_date")
+            .in_("employee_id", roster_ids)
+            .eq("status", "Approved")
+            .lte("start_date", to_date.isoformat())
+            .gte("end_date", from_date.isoformat())
+            .execute()
+        )
+        leave_rows = leave_resp.data or []
+
+        working_days = [d for d in _daterange(from_date, to_date) if d.weekday() < 5]
+
+        attendance_by_key = {
+            (row["employee_id"], row["attendance_date"]): row for row in attendance_rows
+        }
+
+        leave_dates_by_employee: dict[str, set] = {}
+        for row in leave_rows:
+            start = max(date.fromisoformat(row["start_date"]), from_date)
+            end = min(date.fromisoformat(row["end_date"]), to_date)
+            dates = leave_dates_by_employee.setdefault(row["employee_id"], set())
+            for d in _daterange(start, end):
+                dates.add(d)
+
+        by_employee: dict[str, dict] = {}
+        daily_records: list[dict] = []
+
+        for emp_id in roster_ids:
+            emp = roster_by_id[emp_id]
+            summary = {
+                "employee_id": emp_id,
+                "employee_code": emp.get("employee_id"),
+                "full_name": emp.get("full_name"),
+                "department": (emp.get("departments") or {}).get("department_name"),
+                "designation": (emp.get("designations") or {}).get("designation_name"),
+                "working_days": len(working_days),
+                "present_days": 0,
+                "half_days": 0,
+                "leave_days": 0,
+                "absent_days": 0,
+                "late_days": 0,
+                "total_working_minutes": 0,
+                "total_overtime_minutes": 0,
+            }
+            leave_dates = leave_dates_by_employee.get(emp_id, set())
+
+            for d in working_days:
+                record = attendance_by_key.get((emp_id, d.isoformat()))
+                day_status = None
+
+                if record:
+                    day_status = (
+                        "Half Day" if record.get("status") == "Half Day" else "Present"
+                    )
+                    if day_status == "Half Day":
+                        summary["half_days"] += 1
+                    else:
+                        summary["present_days"] += 1
+                    if (record.get("late_minutes") or 0) > 0:
+                        summary["late_days"] += 1
+                        day_status = "Late"
+                    summary["total_working_minutes"] += (
+                        record.get("working_minutes") or 0
+                    )
+                    summary["total_overtime_minutes"] += (
+                        record.get("overtime_minutes") or 0
+                    )
+                elif d in leave_dates:
+                    summary["leave_days"] += 1
+                    day_status = "On Leave"
+                else:
+                    summary["absent_days"] += 1
+                    day_status = "Absent"
+
+                if status and day_status != status:
+                    continue
+
+                working_minutes = record.get("working_minutes") if record else 0
+                daily_records.append(
+                    {
+                        "employee_id": emp_id,
+                        "employee_code": emp.get("employee_id"),
+                        "full_name": emp.get("full_name"),
+                        "department": summary["department"],
+                        "date": d.isoformat(),
+                        "check_in_time": (
+                            record.get("check_in_time") if record else None
+                        ),
+                        "check_out_time": (
+                            record.get("check_out_time") if record else None
+                        ),
+                        "working_hours": round((working_minutes or 0) / 60, 1),
+                        "status": day_status,
+                    }
+                )
+
+            attended = summary["present_days"] + summary["half_days"]
+            summary["attendance_percentage"] = (
+                round((attended / summary["working_days"]) * 100, 1)
+                if summary["working_days"]
+                else 0
+            )
+            by_employee[emp_id] = summary
+
+        return success_response(
+            message="Attendance report fetched successfully.",
+            data={
+                "from_date": from_date.isoformat(),
+                "to_date": to_date.isoformat(),
+                "working_days": len(working_days),
+                "employees": list(by_employee.values()),
+                "daily_records": daily_records,
+            },
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception(e)
+        internal_server_error("Unable to fetch attendance report.")
+
+
 def get_all_attendance(
     page: int = 1, limit: int = 50, target_date: Optional[date] = None
 ):
