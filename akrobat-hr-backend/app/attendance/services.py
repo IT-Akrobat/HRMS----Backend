@@ -1516,25 +1516,69 @@ CORRECTION_SELECT = "*, employees(employee_id, full_name)"
 
 # ==========================================================================
 # TIMEZONE — shift start_time / grace_period in attendance_rules & shifts
-# are entered as IST wall-clock (e.g. "09:00:00" means 9 AM in Chennai, not
-# 9 AM UTC). But every stored/returned timestamp in this app (check_in_time,
+# are entered as company-local wall-clock (e.g. "09:00:00" means 9 AM at
+# whichever office the company has configured in Settings, not 9 AM UTC).
+# But every stored/returned timestamp in this app (check_in_time,
 # check_out_time, audit log created_at, notification created_at, etc.) is
 # UTC — that's the DB column convention (see utils/date.js's parseServerDate
 # on the frontend: a bare timestamp with no "Z"/offset is always assumed to
 # be UTC). So "now" must stay true UTC; what actually needs converting is
-# the shift's IST-authored start time, which has to be translated to UTC
-# before it's compared against a UTC check-in time — not the other way
-# around. (An earlier version of this fix anchored "now" to IST instead,
-# which fixed the late-minutes math but broke the display convention —
-# every attendance timestamp came back looking 5h30m further in the future
-# than it really was, since the frontend still (correctly, for every other
-# timestamp in the app) assumed bare timestamps are UTC.)
+# the shift's company-local-authored start time, which has to be translated
+# to UTC before it's compared against a UTC check-in time — not the other
+# way around. (An earlier version of this fix anchored "now" to a fixed IST
+# offset instead, which fixed the late-minutes math for India-based
+# companies but broke it for every other configured timezone — e.g. a
+# Singapore office (Asia/Singapore, UTC+8) checking in on time was still
+# compared against a 9 AM *India* (UTC+5:30) cutoff, showing everyone as
+# checking in 2h30m "late". The shift's start_time has to be localized to
+# whatever `settings.timezone` actually says the company office is in, not
+# a value hardcoded at write-time.)
 #
 # `_now_utc()` is explicit about forcing UTC rather than relying on the
 # server's OS clock already being UTC (cloud hosts default to UTC, but a
 # server misconfigured to local time would silently break this).
 # ==========================================================================
 IST = ZoneInfo("Asia/Kolkata")
+
+# Friendly labels -> IANA zone names for the timezones Settings currently
+# offers (Settings > Preferences: "Singapore Time" / "India Time"). Falls
+# back to IST below if `settings.timezone` holds neither an alias here nor
+# a value ZoneInfo recognizes directly, so existing India-only deployments
+# that never touched this setting keep behaving exactly as before.
+TIMEZONE_ALIASES = {
+    "singapore": "Asia/Singapore",
+    "singapore time": "Asia/Singapore",
+    "india": "Asia/Kolkata",
+    "india time": "Asia/Kolkata",
+}
+
+
+def _get_company_timezone() -> ZoneInfo:
+    """
+    Resolves the IANA timezone the company's shift start_time / grace
+    period wall-clock values are authored in, from `settings.timezone`
+    (Settings > Preferences). Looked up fresh per check-in rather than
+    cached, matching `_get_attendance_rule()`'s pattern — this table is
+    edited rarely, so the extra read is cheap and avoids ever serving a
+    stale timezone after an admin changes it. Falls back to IST
+    (`Asia/Kolkata`) if settings has no row, no timezone value, or a value
+    that isn't a recognized alias or valid IANA name.
+    """
+    try:
+        settings_row = (
+            supabase_admin.table("settings").select("timezone").limit(1).execute()
+        )
+        raw = (settings_row.data or [{}])[0].get("timezone")
+        if raw:
+            key = raw.strip().lower()
+            zone_name = TIMEZONE_ALIASES.get(key, raw.strip())
+            return ZoneInfo(zone_name)
+    except Exception as e:
+        logger.error(
+            f"Failed to resolve company timezone from settings, falling back to IST: {e}"
+        )
+
+    return IST
 
 
 def _now_utc() -> datetime:
@@ -1649,22 +1693,36 @@ def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
 
 
 def _late_minutes(
-    check_in_time: datetime, for_date: date, shift: Optional[dict], rule: dict
+    check_in_time: datetime,
+    for_date: date,
+    shift: Optional[dict],
+    rule: dict,
+    tz: ZoneInfo = IST,
 ) -> int:
     """
     `check_in_time` is UTC (see `_now_utc()`). `shift["start_time"]` is
-    authored in IST wall-clock (e.g. "09:00:00" means 9 AM in Chennai), so
-    it has to be localized to IST and converted to UTC before comparing —
+    authored in the company's configured local wall-clock (`tz` — resolved
+    by `_get_company_timezone()` from `settings.timezone`, e.g. "09:00:00"
+    means 9 AM in Singapore for a company set to Asia/Singapore), so it has
+    to be localized to `tz` and converted to UTC before comparing —
     comparing it directly against a UTC check_in_time (as if "09:00" were
-    already UTC) is off by exactly the IST offset (5h30m), which is what
-    made genuinely-late check-ins show as only a few minutes late.
+    already UTC) is off by exactly `tz`'s offset, which is what made
+    genuinely-late check-ins show as only a few minutes late (or on-time
+    check-ins show as hours late, for offices outside India). `tz` defaults
+    to IST only so any other lingering caller of this helper keeps its
+    previous behavior — callers wired up to Settings should always pass
+    `_get_company_timezone()` explicitly.
     """
     if not shift or not shift.get("start_time"):
         return 0
 
     hh, mm, *_ = str(shift["start_time"]).split(":")
-    scheduled_start_ist = datetime.combine(for_date, time(int(hh), int(mm)), tzinfo=IST)
-    scheduled_start = scheduled_start_ist.astimezone(timezone.utc).replace(tzinfo=None)
+    scheduled_start_local = datetime.combine(
+        for_date, time(int(hh), int(mm)), tzinfo=tz
+    )
+    scheduled_start = scheduled_start_local.astimezone(timezone.utc).replace(
+        tzinfo=None
+    )
 
     grace = shift.get("grace_period")
     if grace is None:
@@ -1860,7 +1918,8 @@ def check_in(auth_user_id: str, data, request: Optional[Request] = None):
         check_in_time = _now_utc()
         shift = _get_employee_shift(employee_id, today)
         rule = _get_attendance_rule()
-        late_minutes = _late_minutes(check_in_time, today, shift, rule)
+        company_tz = _get_company_timezone()
+        late_minutes = _late_minutes(check_in_time, today, shift, rule, tz=company_tz)
 
         payload = {
             "employee_id": employee_id,
@@ -2130,10 +2189,11 @@ def get_attendance_reminder_status(auth_user_id: str):
             )
 
         hh, mm, *_ = str(shift["start_time"]).split(":")
-        scheduled_start_ist = datetime.combine(
-            today, time(int(hh), int(mm)), tzinfo=IST
+        company_tz = _get_company_timezone()
+        scheduled_start_local = datetime.combine(
+            today, time(int(hh), int(mm)), tzinfo=company_tz
         )
-        scheduled_start = scheduled_start_ist.astimezone(timezone.utc).replace(
+        scheduled_start = scheduled_start_local.astimezone(timezone.utc).replace(
             tzinfo=None
         )
 
