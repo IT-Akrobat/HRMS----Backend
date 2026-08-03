@@ -6,6 +6,7 @@ from app.leaves.services import (
     apply_leave,
     get_my_leaves,
     get_all_leaves,
+    get_leave_types,
     get_team_leaves,
     update_leave_status,
 )
@@ -24,7 +25,9 @@ router = APIRouter(prefix="/leaves", tags=["Leaves"])
 
 
 @router.post("/")
-def create_leave(data: CreateLeaveRequest, request: Request, user=Depends(get_current_user)):
+def create_leave(
+    data: CreateLeaveRequest, request: Request, user=Depends(get_current_user)
+):
     return apply_leave(user.id, data, request=request)
 
 
@@ -61,6 +64,16 @@ def all_leaves(
     user=Depends(require_permission("VIEW_LEAVE_REQUESTS")),
 ):
     return get_all_leaves(page=page, limit=limit, status=status)
+
+
+# ==========================================
+# GET LEAVE TYPES (HR / Admin — org-wide list with default_days/allocation)
+# ==========================================
+
+
+@router.get("/types")
+def leave_types(user=Depends(require_permission("VIEW_LEAVE_REQUESTS"))):
+    return get_leave_types()
 
 
 # ==========================================

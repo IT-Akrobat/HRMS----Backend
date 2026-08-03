@@ -166,6 +166,31 @@ def get_my_leaves(auth_user_id: str):
 
 
 # ==========================================
+# GET LEAVE TYPES (HR / Admin — org-wide config, requires VIEW_LEAVE_REQUESTS)
+# Exposes each leave type's default_days, i.e. the annual allocation.
+# Used by the Leave Balance screen to compute remaining = allocation - used.
+# ==========================================
+
+
+def get_leave_types():
+    try:
+        records, _total = leave_type_repo.list(
+            select="id, leave_name, default_days",
+            order_by="leave_name",
+        )
+        return success_response(
+            message="Leave types fetched successfully.", data=records
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception(e)
+        internal_server_error("Unable to fetch leave types.")
+
+
+# ==========================================
 # GET ALL LEAVES (HR / Admin — company-wide, requires VIEW_LEAVE_REQUESTS)
 # ==========================================
 
