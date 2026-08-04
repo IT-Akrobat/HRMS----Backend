@@ -42,6 +42,7 @@ def _get_token() -> str | None:
     """
 
     if not ONEMAP_EMAIL or not ONEMAP_PASSWORD:
+        logger.warning("OneMap login skipped: ONEMAP_EMAIL/ONEMAP_PASSWORD not set.")
         return None
 
     if _token_cache["token"] and time.time() < _token_cache["expiry"] - 3600:
@@ -59,6 +60,13 @@ def _get_token() -> str | None:
         token = payload.get("access_token")
         expiry = payload.get("expiry_timestamp")
         if not token:
+            # A 200 with no access_token means OneMap accepted the request
+            # but rejected the credentials (e.g. wrong password, or the
+            # account was never activated/has expired) — this is the most
+            # likely reason every check-in has been falling back to
+            # Nominatim. Logging the payload surfaces that instead of
+            # silently returning None forever.
+            logger.warning(f"OneMap login returned no access_token: {payload}")
             return None
 
         _token_cache["token"] = token
@@ -81,6 +89,11 @@ def reverse_geocode_sg(lat: float, lon: float) -> str | None:
 
     token = _get_token()
     if not token:
+        logger.warning(
+            "OneMap reverse geocode skipped: no token (missing/invalid "
+            "ONEMAP_EMAIL/ONEMAP_PASSWORD, or login is failing — check the "
+            "'OneMap login failed' warning above)."
+        )
         return None
 
     try:
@@ -89,7 +102,17 @@ def reverse_geocode_sg(lat: float, lon: float) -> str | None:
                 ONEMAP_REVGEOCODE_URL,
                 params={
                     "location": f"{lat},{lon}",
-                    "buffer": 40,
+                    # Was 40 — too tight. OneMap's building match only fires
+                    # when a mapped building centroid falls within this
+                    # radius, and real GPS fixes (especially indoors / near
+                    # tall industrial blocks, which cause Wi-Fi/GPS
+                    # multipath) are routinely 50-150m off. That silently
+                    # produced zero GeocodeInfo results for check-ins that
+                    # were, in reality, right at the building — which is
+                    # what sent every one of them to the Nominatim fallback
+                    # below instead. 150m is still well under OneMap's 500m
+                    # cap and comfortably covers realistic GPS drift.
+                    "buffer": 150,
                     "addressType": "All",
                     "otherFeatures": "N",
                 },
@@ -100,6 +123,16 @@ def reverse_geocode_sg(lat: float, lon: float) -> str | None:
 
         results = payload.get("GeocodeInfo") or []
         if not results:
+            # Previously swallowed silently, so there was no way to tell
+            # "no building within buffer" apart from "token/endpoint
+            # broken" apart from "OneMap returned an error body with a 200
+            # status" (OneMap does this for some invalid-token cases). Log
+            # the raw payload so whichever it is shows up in the server
+            # logs instead of just quietly falling back every time.
+            logger.warning(
+                f"OneMap reverse geocode returned no results for "
+                f"({lat}, {lon}); raw response: {payload}"
+            )
             return None
 
         info = results[0]
