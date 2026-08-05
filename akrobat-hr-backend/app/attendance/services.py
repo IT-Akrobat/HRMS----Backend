@@ -1724,13 +1724,13 @@ def _late_minutes(
         tzinfo=None
     )
 
-    grace = shift.get("grace_period")
-    if grace is None:
-        grace = rule.get("late_grace_minutes", 0)
-
+    # No grace period: any check-in after the scheduled start counts as
+    # late, down to the minute. (Previously subtracted a configurable
+    # shift/rule grace_period — e.g. a 10-minute cushion before minutes
+    # started counting — but that's no longer wanted.)
     diff_minutes = (check_in_time - scheduled_start).total_seconds() / 60
 
-    return int(diff_minutes - grace) if diff_minutes > grace else 0
+    return int(diff_minutes) if diff_minutes > 0 else 0
 
 
 def _minimum_work_minutes(shift: Optional[dict], rule: dict) -> int:
