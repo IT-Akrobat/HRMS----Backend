@@ -212,7 +212,8 @@ def attendance_report():
             *,
             employees(
                 full_name,
-                employee_id
+                employee_id,
+                profile_photo
             )
             """).order("attendance_date", desc=True).execute()
 
@@ -240,7 +241,8 @@ def today_attendance():
             *,
             employees(
                 full_name,
-                employee_id
+                employee_id,
+                profile_photo
             )
             """).eq("attendance_date", today).execute()
 
@@ -276,7 +278,8 @@ def leave_report():
             *,
             employees!leave_requests_employee_id_fkey(
                 full_name,
-                employee_id
+                employee_id,
+                profile_photo
             )
             """).execute()
 
@@ -302,7 +305,8 @@ def payroll_report():
             *,
             employees(
                 full_name,
-                employee_id
+                employee_id,
+                profile_photo
             )
             """).execute()
 

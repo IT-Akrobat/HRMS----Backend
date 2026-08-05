@@ -1511,7 +1511,7 @@ from app.notifications.services import notify_employee
 attendance_repo = SupabaseRepository("attendance")
 correction_repo = SupabaseRepository("attendance_corrections")
 
-ATTENDANCE_SELECT = "*, employees(employee_id, full_name)"
+ATTENDANCE_SELECT = "*, employees(employee_id, full_name, profile_photo)"
 CORRECTION_SELECT = "*, employees(employee_id, full_name)"
 
 # ==========================================================================
@@ -3961,6 +3961,7 @@ def get_org_attendance_report(
                 "employee_id": emp_id,
                 "employee_code": emp.get("employee_id"),
                 "full_name": emp.get("full_name"),
+                "profile_photo": emp.get("profile_photo"),
                 "department": (emp.get("departments") or {}).get("department_name"),
                 "designation": (emp.get("designations") or {}).get("designation_name"),
                 "working_days": len(working_days),
@@ -4011,6 +4012,7 @@ def get_org_attendance_report(
                         "employee_id": emp_id,
                         "employee_code": emp.get("employee_id"),
                         "full_name": emp.get("full_name"),
+                        "profile_photo": emp.get("profile_photo"),
                         "department": summary["department"],
                         "date": d.isoformat(),
                         "check_in_time": (
