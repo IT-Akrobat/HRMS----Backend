@@ -65,6 +65,7 @@ from app.dashboard.schemas import DashboardStats
 from app.dashboard.services import (
     get_admin_dashboard,
     get_attendance_trend,
+    get_attendance_trend_detail,
     get_celebrations,
     get_department_distribution,
     get_on_leave_today,
@@ -86,11 +87,24 @@ def dashboard(user=Depends(get_current_user)):
 
 @router.get("/attendance-trend")
 def attendance_trend(
-    days: int = Query(7, ge=2, le=30),
+    days: int = Query(7, ge=1, le=30),
     user=Depends(get_current_user),
 ):
 
     return get_attendance_trend(days=days)
+
+
+@router.get("/attendance-trend/detail")
+def attendance_trend_detail(
+    days: int = Query(7, ge=1, le=30),
+    status: str = Query(..., description="onTime | late | on_leave | absent"),
+    user=Depends(get_current_user),
+):
+    """Who's behind one donut segment for the same window — powers the
+    click-through list on the dashboard's Attendance Trend chart.
+    """
+
+    return get_attendance_trend_detail(days=days, status=status)
 
 
 @router.get("/department-distribution")

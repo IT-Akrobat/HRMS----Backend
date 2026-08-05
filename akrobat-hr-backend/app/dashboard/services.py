@@ -1624,6 +1624,161 @@ def get_attendance_trend(days: int = 7):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# Keys the frontend donut can ask for — mirrors the SERIES keys in
+# AttendanceTrendChart.jsx.
+_TREND_DETAIL_STATUSES = {"onTime", "late", "on_leave", "absent"}
+
+
+def get_attendance_trend_detail(days: int = 7, status: str = "onTime"):
+    """Who's behind one segment of the attendance-trend donut, for the
+    same window get_attendance_trend() used — powers the click-through
+    list on the dashboard's Attendance Trend chart
+    (GET /dashboard/attendance-trend/detail).
+
+    Deliberately re-derives counts from `attendance` / `leave_requests`
+    directly (same day-by-day walk as get_attendance_trend, weekends
+    included) rather than the Attendance Reports endpoint, so the number
+    shown here always reconciles with the donut total it was clicked
+    from.
+    """
+
+    if status not in _TREND_DETAIL_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid status '{status}'. Expected one of: "
+            f"{', '.join(sorted(_TREND_DETAIL_STATUSES))}",
+        )
+
+    try:
+
+        end = date.today()
+        start = end - timedelta(days=days - 1)
+        window_days = (end - start).days + 1
+
+        employees = (
+            supabase_admin.table("employees")
+            .select(
+                "id, full_name, employee_id, profile_photo, "
+                "departments!employees_department_id_fkey(department_name)"
+            )
+            .execute()
+            .data
+            or []
+        )
+        emp_by_id = {e["id"]: e for e in employees}
+
+        def to_person(employee_id, day_count):
+            emp = emp_by_id.get(employee_id)
+            if not emp:
+                return None
+            return {
+                "employee_id": employee_id,
+                "employee_code": emp.get("employee_id"),
+                "full_name": emp.get("full_name"),
+                "profile_photo": emp.get("profile_photo"),
+                "department": (emp.get("departments") or {}).get("department_name"),
+                "days": day_count,
+            }
+
+        def leave_days_by_employee():
+            leave_rows = (
+                supabase_admin.table("leave_requests")
+                .select("employee_id, start_date, end_date")
+                .eq("status", "Approved")
+                .lte("start_date", end.isoformat())
+                .gte("end_date", start.isoformat())
+                .execute()
+                .data
+                or []
+            )
+            counts = {}
+            for row in leave_rows:
+                emp_id = row.get("employee_id")
+                row_start = row.get("start_date")
+                row_end = row.get("end_date")
+                if not emp_id or not row_start or not row_end:
+                    continue
+                cursor = max(date.fromisoformat(row_start), start)
+                last = min(date.fromisoformat(row_end), end)
+                n = 0
+                while cursor <= last:
+                    n += 1
+                    cursor += timedelta(days=1)
+                if n:
+                    counts[emp_id] = counts.get(emp_id, 0) + n
+            return counts
+
+        if status == "on_leave":
+            day_counts = leave_days_by_employee()
+
+        elif status in ("onTime", "late"):
+            attendance_rows = (
+                supabase_admin.table("attendance")
+                .select("employee_id, late_minutes")
+                .gte("attendance_date", start.isoformat())
+                .lte("attendance_date", end.isoformat())
+                .execute()
+                .data
+                or []
+            )
+            day_counts = {}
+            for row in attendance_rows:
+                emp_id = row.get("employee_id")
+                if not emp_id:
+                    continue
+                is_late = (row.get("late_minutes") or 0) > 0
+                if is_late != (status == "late"):
+                    continue
+                day_counts[emp_id] = day_counts.get(emp_id, 0) + 1
+
+        else:  # "absent" — present in the window neither via attendance nor leave
+            attendance_rows = (
+                supabase_admin.table("attendance")
+                .select("employee_id")
+                .gte("attendance_date", start.isoformat())
+                .lte("attendance_date", end.isoformat())
+                .execute()
+                .data
+                or []
+            )
+            present_counts = {}
+            for row in attendance_rows:
+                emp_id = row.get("employee_id")
+                if emp_id:
+                    present_counts[emp_id] = present_counts.get(emp_id, 0) + 1
+
+            leave_counts = leave_days_by_employee()
+
+            day_counts = {}
+            for emp_id in emp_by_id:
+                absent_days = (
+                    window_days
+                    - present_counts.get(emp_id, 0)
+                    - leave_counts.get(emp_id, 0)
+                )
+                if absent_days > 0:
+                    day_counts[emp_id] = absent_days
+
+        people = [
+            person
+            for person in (
+                to_person(emp_id, count) for emp_id, count in day_counts.items()
+            )
+            if person is not None
+        ]
+        people.sort(key=lambda p: (-p["days"], p["full_name"] or ""))
+
+        return {"days": days, "status": status, "people": people}
+
+    except HTTPException:
+
+        raise
+
+    except Exception as e:
+
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 def get_celebrations(days: int = 30):
     """Upcoming birthdays (employees.date_of_birth) and work
     anniversaries (employees.joining_date) within the next `days` days,
