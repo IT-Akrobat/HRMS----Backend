@@ -1511,7 +1511,7 @@ from app.notifications.services import notify_employee
 attendance_repo = SupabaseRepository("attendance")
 correction_repo = SupabaseRepository("attendance_corrections")
 
-ATTENDANCE_SELECT = "*, employees(employee_id, full_name, profile_photo)"
+ATTENDANCE_SELECT = "*, employees(employee_id, full_name)"
 CORRECTION_SELECT = "*, employees(employee_id, full_name)"
 
 # ==========================================================================
@@ -1724,13 +1724,13 @@ def _late_minutes(
         tzinfo=None
     )
 
-    # No grace period: any check-in after the scheduled start counts as
-    # late, down to the minute. (Previously subtracted a configurable
-    # shift/rule grace_period — e.g. a 10-minute cushion before minutes
-    # started counting — but that's no longer wanted.)
+    grace = shift.get("grace_period")
+    if grace is None:
+        grace = rule.get("late_grace_minutes", 0)
+
     diff_minutes = (check_in_time - scheduled_start).total_seconds() / 60
 
-    return int(diff_minutes) if diff_minutes > 0 else 0
+    return int(diff_minutes - grace) if diff_minutes > grace else 0
 
 
 def _minimum_work_minutes(shift: Optional[dict], rule: dict) -> int:
@@ -3961,7 +3961,6 @@ def get_org_attendance_report(
                 "employee_id": emp_id,
                 "employee_code": emp.get("employee_id"),
                 "full_name": emp.get("full_name"),
-                "profile_photo": emp.get("profile_photo"),
                 "department": (emp.get("departments") or {}).get("department_name"),
                 "designation": (emp.get("designations") or {}).get("designation_name"),
                 "working_days": len(working_days),
@@ -4012,7 +4011,6 @@ def get_org_attendance_report(
                         "employee_id": emp_id,
                         "employee_code": emp.get("employee_id"),
                         "full_name": emp.get("full_name"),
-                        "profile_photo": emp.get("profile_photo"),
                         "department": summary["department"],
                         "date": d.isoformat(),
                         "check_in_time": (
