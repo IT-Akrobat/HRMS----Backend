@@ -1612,7 +1612,7 @@ def _get_attendance_rule() -> dict:
         logger.error(f"Failed to fetch attendance_rules, using defaults: {e}")
 
     return {
-        "late_grace_minutes": 10,
+        "late_grace_minutes": 0,
         "minimum_work_minutes": 480,
         "overtime_after_minutes": 480,
     }
