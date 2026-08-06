@@ -1,7 +1,7 @@
 import asyncio
 import sys
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 # Windows-only fix: uvicorn's default ProactorEventLoop on Windows has a
@@ -59,6 +59,9 @@ from app.expenses.routes import router as expense_router
 from app.audit_logs.routes import router as audit_log_router
 
 from app.core.config import APP_NAME, APP_VERSION, ENVIRONMENT, ALLOWED_ORIGINS
+from app.core import realtime
+from app.core.database import supabase
+from app.core.rbac import has_permission
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
@@ -92,6 +95,60 @@ def health():
     # transient upstream blip. Add a separate /health/db check if you want
     # DB connectivity verified explicitly.
     return {"status": "healthy"}
+
+
+@app.on_event("startup")
+async def _capture_event_loop():
+    # attendance/services.py broadcasts to /ws/dashboard from sync worker
+    # threads (see app/core/realtime.py) — it needs a reference to *this*
+    # loop to hop back onto it.
+    realtime.set_main_loop(asyncio.get_running_loop())
+
+
+@app.websocket("/ws/dashboard")
+async def dashboard_ws(websocket: WebSocket, token: str = Query(...)):
+    # Live push for the super-admin dashboard: instead of polling
+    # GET /dashboard and GET /audit-logs on a timer, the frontend opens
+    # this socket and gets a message the instant any employee checks
+    # in/out or starts/ends a break (see the broadcast_threadsafe() calls
+    # in app/attendance/services.py), then refetches just those two
+    # endpoints itself.
+    #
+    # Browsers can't attach an Authorization header to a WebSocket
+    # handshake, so the Supabase access token travels as a query param
+    # instead — same token apiClient.js already holds in sessionStorage,
+    # just appended to the ws:// URL rather than sent as a header.
+    try:
+        user_response = supabase.auth.get_user(token)
+        user = user_response.user if user_response else None
+    except Exception:
+        user = None
+
+    if not user:
+        await websocket.close(code=4401)
+        return
+
+    try:
+        allowed = has_permission(user.id, "VIEW_ALL_ATTENDANCE")
+    except Exception:
+        allowed = False
+
+    if not allowed:
+        await websocket.close(code=4403)
+        return
+
+    await websocket.accept()
+    await realtime.register(websocket)
+    try:
+        while True:
+            # The client never sends anything meaningful here — this just
+            # blocks until the tab closes/reloads/loses connection, which
+            # raises WebSocketDisconnect below so we can clean up.
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await realtime.unregister(websocket)
 
 
 app.add_exception_handler(HTTPException, http_exception_handler)

@@ -1506,6 +1506,7 @@ from app.core.helpers.employee_helper import (
 )
 from app.core.constants import ADMIN
 from app.core.database import supabase_admin
+from app.core import realtime
 from app.notifications.services import notify_employee
 
 attendance_repo = SupabaseRepository("attendance")
@@ -2005,6 +2006,14 @@ def check_in(auth_user_id: str, data, request: Optional[Request] = None):
             request=request,
         )
 
+        realtime.broadcast_threadsafe(
+            {
+                "type": "attendance_event",
+                "action": "check_in",
+                "employee_id": employee_id,
+            }
+        )
+
         return success_response(
             message="Checked in successfully.", data=attendance_data
         )
@@ -2099,6 +2108,14 @@ def check_out(auth_user_id: str, data, request: Optional[Request] = None):
             old_values=existing,
             new_values=updated,
             request=request,
+        )
+
+        realtime.broadcast_threadsafe(
+            {
+                "type": "attendance_event",
+                "action": "check_out",
+                "employee_id": employee_id,
+            }
         )
 
         return success_response(message="Checked out successfully.", data=updated)
@@ -2331,6 +2348,14 @@ def start_break(auth_user_id: str, request: Optional[Request] = None):
             request=request,
         )
 
+        realtime.broadcast_threadsafe(
+            {
+                "type": "attendance_event",
+                "action": "break_start",
+                "employee_id": employee_id,
+            }
+        )
+
         return success_response(message="Break started.", data=record)
 
     except HTTPException:
@@ -2403,6 +2428,14 @@ def end_break(auth_user_id: str, request: Optional[Request] = None):
             record_id=attendance["id"],
             description=f"Break ended — {_format_duration_minutes(break_minutes)}",
             request=request,
+        )
+
+        realtime.broadcast_threadsafe(
+            {
+                "type": "attendance_event",
+                "action": "break_end",
+                "employee_id": employee_id,
+            }
         )
 
         record = updated_break.data[0] if updated_break.data else None
