@@ -31,3 +31,14 @@ alter table attendance_site_visits
 create index if not exists idx_site_visits_outside_radius
     on attendance_site_visits(employee_id)
     where departure_time is null and is_outside_radius = true;
+
+-- Zeroes out the 10-minute grace period already sitting in existing rows.
+-- (The earlier fix to 001_schema.sql / 003_attendance_info_seed.sql only
+-- changes what gets INSERTed on a *fresh* database — it does nothing to
+-- rows that already exist. This migration updates those rows directly.)
+
+update attendance_rules
+set late_grace_minutes = 0;
+
+update shifts
+set grace_period = 0;
