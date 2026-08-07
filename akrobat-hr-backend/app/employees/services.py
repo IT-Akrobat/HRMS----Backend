@@ -314,13 +314,12 @@ from app.core.database import supabase_admin
 from app.core.repository import SupabaseRepository
 from app.core.responses import success_response
 from app.core.logger import logger
-from app.core.exceptions import internal_server_error, conflict
+from app.core.exceptions import internal_server_error, conflict, bad_request
 from app.core.messages import EMPLOYEE_CREATED, EMPLOYEE_UPDATED, EMPLOYEE_DELETED
+from app.core.constants import ADMIN
 from app.core.helpers.employee_helper import (
-    ALLOWED_DOMAIN,
     generate_employee_id,
     generate_temp_password,
-    validate_company_email,
     check_email_exists,
     validate_reference,
     get_employee_or_404,
@@ -329,6 +328,7 @@ from app.core.helpers.employee_helper import (
     get_all_report_ids,
     is_field_employee,
 )
+from app.core.validators import validate_email
 from app.core.audit import record_audit_log
 
 employee_repo = SupabaseRepository("employees")
@@ -422,20 +422,45 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
     auth_user_id = None
 
     try:
-        # Email is optional on the create form now. If HR left it blank,
-        # a placeholder login email is generated below once the employee
-        # code is known -- Supabase auth still needs *some* email on
-        # file. If HR did type one in, it's still validated/checked as
-        # before.
-        if data.email:
-            validate_company_email(data.email)
-            check_email_exists(data.email)
+        # Email is required -- no more optional-email flow, and no more
+        # placeholder login derived from the employee code. Format is
+        # checked (any domain is fine, not just @akrobat.com.sg), and
+        # uniqueness is checked before we touch Supabase auth.
+        validate_email(data.email)
+        check_email_exists(data.email)
 
         validate_reference("departments", data.department_id, "Department")
         validate_reference("designations", data.designation_id, "Designation")
         validate_reference("shifts", data.shift_id, "Shift")
         validate_reference("roles", data.role_id, "Role")
         validate_reference("employees", data.manager_id, "Manager")
+
+        # SUPER ADMIN can never be handed out through this endpoint, even
+        # to a caller who is themselves SUPER ADMIN or HR (both of whom
+        # otherwise pass the require_role gate above and can set role_id
+        # to anything that exists in `roles`). The one fixed Super Admin
+        # login (IT@akrobat.com.sg) is bootstrapped exclusively via
+        # scripts/create_super_admin.py, run from the backend terminal --
+        # never through the API/UI. This is the actual guard; the
+        # frontend also hides SUPER ADMIN from the role dropdown, but
+        # that's just UX and isn't sufficient on its own since role_id is
+        # a plain field on the request body.
+        role_row = (
+            supabase_admin.table("roles")
+            .select("role_name")
+            .eq("id", str(data.role_id))
+            .maybe_single()
+            .execute()
+        )
+        if (
+            role_row
+            and role_row.data
+            and (role_row.data.get("role_name") or "").strip().upper() == ADMIN
+        ):
+            bad_request(
+                "SUPER ADMIN cannot be assigned here. It is created only "
+                "via scripts/create_super_admin.py from the server terminal."
+            )
 
         # Working hours must be set at creation time. If HR didn't pick a
         # shift explicitly, fall back to the designation's default_shift_id
@@ -460,10 +485,7 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
         )
         generated_password = generate_temp_password()
 
-        # Email is optional -- fall back to a placeholder derived from the
-        # employee code so Supabase auth (which requires an email) still
-        # has something to create the login with.
-        employee_email = data.email or f"{new_employee_id.lower()}@{ALLOWED_DOMAIN}"
+        employee_email = data.email
 
         auth_user = supabase_admin.auth.admin.create_user(
             {
@@ -571,7 +593,7 @@ def update_employee(
         update_data = data.model_dump(exclude_unset=True)
 
         if "email" in update_data and update_data["email"]:
-            validate_company_email(update_data["email"])
+            validate_email(update_data["email"])
 
             if (
                 employee_repo.find_one({"email": update_data["email"]}) not in (None,)

@@ -47,6 +47,7 @@ from app.employee_project_assignments.routes import (
 )
 from app.site_assignments.routes import router as site_assignment_router
 from app.notifications.routes import router as notification_router
+from app.push_subscriptions.routes import router as push_subscriptions_router
 from app.notification_preferences.routes import (
     router as notification_preferences_router,
 )
@@ -182,6 +183,7 @@ app.include_router(employee_project_assignment_router)
 app.include_router(site_assignment_router)
 
 app.include_router(notification_router)
+app.include_router(push_subscriptions_router)
 
 app.include_router(notification_preferences_router)
 

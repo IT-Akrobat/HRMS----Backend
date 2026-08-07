@@ -8,7 +8,9 @@ from app.core.exceptions import bad_request, internal_server_error, not_found
 from app.core.logger import logger
 from app.core.helpers.employee_helper import get_employee_id_for_auth_user
 from app.core.email import send_email
+from app.core.push import push_configured
 from app.notification_preferences.services import get_preference
+from app.push_subscriptions.services import send_push_to_employee
 
 # ---------------------------------------------------------------------------
 # Backs NotificationsPage.jsx (src/components/common/Notificationpage.jsx),
@@ -362,5 +364,17 @@ def notify_employee(
             send_email(to_email, subject=title, body=message)
     except Exception as e:
         logger.error(f"Failed to send email copy to {employee_id}: {e}")
+
+    # Real device push -- the "pops up like WhatsApp, even with the app
+    # closed" behaviour. Same best-effort contract as the email copy
+    # above: skipped silently if VAPID keys aren't configured yet
+    # (push_configured() check avoids a pointless subscriptions lookup),
+    # and any send failure here never affects the in-app notification
+    # already written above.
+    try:
+        if push_configured():
+            send_push_to_employee(employee_id, title=title, body=message)
+    except Exception as e:
+        logger.error(f"Failed to send push copy to {employee_id}: {e}")
 
     return row

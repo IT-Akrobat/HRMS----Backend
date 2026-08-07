@@ -221,8 +221,15 @@ def get_employee_by_code(employee_code: str) -> dict | None:
 
 
 # ==========================================
-# VALIDATE COMPANY EMAIL
+# VALIDATE COMPANY EMAIL (unused)
 # ==========================================
+#
+# No longer called from create_employee()/update_employee() -- the
+# @akrobat.com.sg-only restriction on user-entered emails was removed.
+# Any syntactically valid email is now accepted there (see
+# app/core/validators.validate_email). Left here only because
+# ALLOWED_DOMAIN below is still used for the auto-generated placeholder
+# login email when HR leaves the email field blank.
 
 
 def validate_company_email(email: str):

@@ -136,10 +136,10 @@ class EmployeeCreate(BaseModel):
 
     full_name: str = Field(..., min_length=2, max_length=100)
 
-    # Optional -- if HR leaves it blank, create_employee() generates a
-    # placeholder @akrobat.com.sg login email from the auto-generated
-    # employee code instead (see app/employees/services.py).
-    email: Optional[EmailStr] = None
+    # Required -- no auto-generated placeholder login email anymore. HR
+    # must supply a real email; the employee code is never appended to
+    # build one (see app/employees/services.py create_employee()).
+    email: EmailStr
 
     # No longer accepted from the client -- see app/employees/services.py
     # create_employee(). The employee_id (code) is auto-generated from

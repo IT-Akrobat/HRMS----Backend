@@ -82,3 +82,19 @@ PEXELS_SEARCH_QUERY = os.getenv(
 # frontend instead of the app failing to start.
 ONEMAP_EMAIL = os.getenv("ONEMAP_EMAIL")
 ONEMAP_PASSWORD = os.getenv("ONEMAP_PASSWORD")
+
+# ---------------------------------------------------------------------
+# Web Push (see app/core/push.py, app/push_subscriptions)
+# ---------------------------------------------------------------------
+# Optional and read with os.getenv (not get_env()) -- same
+# degrade-gracefully pattern as SMTP/Pexels/OneMap above. Generate a
+# pair once with:
+#   python -m scripts.generate_vapid_keys
+# and set them as env vars. If unset, push sends are skipped (logged,
+# not raised) and every other notification path keeps working exactly
+# as before.
+VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY")
+VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY")
+# Web Push requires a contact per RFC 8292 so push services can reach
+# you about a misbehaving sender -- any mailto: works.
+VAPID_CLAIMS_EMAIL = os.getenv("VAPID_CLAIMS_EMAIL", "mailto:admin@akrobat.com")
