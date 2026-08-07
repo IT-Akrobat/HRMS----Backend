@@ -63,6 +63,7 @@ from app.core.config import APP_NAME, APP_VERSION, ENVIRONMENT, ALLOWED_ORIGINS
 from app.core import realtime
 from app.core.database import supabase
 from app.core.rbac import has_permission
+from app.core.helpers.employee_helper import get_employee_id_for_auth_user
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
@@ -150,6 +151,50 @@ async def dashboard_ws(websocket: WebSocket, token: str = Query(...)):
         pass
     finally:
         await realtime.unregister(websocket)
+
+
+@app.websocket("/ws/notifications")
+async def notifications_ws(websocket: WebSocket, token: str = Query(...)):
+    # Real-time replacement for the frontend's old "poll GET
+    # /notifications/my every few seconds" approach (see
+    # src/components/layout/Header.jsx / useNotificationLiveUpdates).
+    # notify_employee() in app/notifications/services.py pushes a message
+    # here the instant a notification row is written, so it shows up as a
+    # toast with no polling delay. Same query-param token pattern as
+    # /ws/dashboard above (WebSocket handshakes can't carry an
+    # Authorization header).
+    #
+    # Unlike /ws/dashboard (one shared feed for anyone with
+    # VIEW_ALL_ATTENDANCE), this is private per employee -- each socket is
+    # registered under the connecting employee's own id, and only ever
+    # receives notifications written for that id.
+    try:
+        user_response = supabase.auth.get_user(token)
+        user = user_response.user if user_response else None
+    except Exception:
+        user = None
+
+    if not user:
+        await websocket.close(code=4401)
+        return
+
+    employee_id = get_employee_id_for_auth_user(user.id)
+    if not employee_id:
+        await websocket.close(code=4403)
+        return
+
+    await websocket.accept()
+    await realtime.register_notification_socket(employee_id, websocket)
+    try:
+        while True:
+            # Client never sends anything meaningful -- this just blocks
+            # until the tab closes/reloads/loses connection, which raises
+            # WebSocketDisconnect below so we can clean up.
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await realtime.unregister_notification_socket(employee_id, websocket)
 
 
 app.add_exception_handler(HTTPException, http_exception_handler)

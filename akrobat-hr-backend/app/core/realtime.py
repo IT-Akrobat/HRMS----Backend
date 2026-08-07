@@ -25,6 +25,16 @@ logger = logging.getLogger(__name__)
 _connections: list[WebSocket] = []
 _main_loop: Optional[asyncio.AbstractEventLoop] = None
 
+# ---------------------------------------------------------------------------
+# Per-employee registry, used by /ws/notifications (see app/main.py). Unlike
+# the all-clients dashboard hub above, notifications are private to the
+# employee they belong to, so this keys connections by employee_id instead
+# of broadcasting to everyone. One employee can have several sockets open
+# at once (e.g. desktop tab + phone browser both logged in), so each id maps
+# to a list.
+# ---------------------------------------------------------------------------
+_notification_connections: dict[str, list[WebSocket]] = {}
+
 
 def set_main_loop(loop: asyncio.AbstractEventLoop) -> None:
     global _main_loop
@@ -66,3 +76,53 @@ def broadcast_threadsafe(event: dict[str, Any]) -> None:
         asyncio.run_coroutine_threadsafe(_broadcast(event), _main_loop)
     except Exception as e:
         logger.error(f"Failed to broadcast realtime event: {e}")
+
+
+async def register_notification_socket(employee_id: str, websocket: WebSocket) -> None:
+    _notification_connections.setdefault(employee_id, []).append(websocket)
+
+
+async def unregister_notification_socket(
+    employee_id: str, websocket: WebSocket
+) -> None:
+    sockets = _notification_connections.get(employee_id)
+    if not sockets:
+        return
+    if websocket in sockets:
+        sockets.remove(websocket)
+    if not sockets:
+        _notification_connections.pop(employee_id, None)
+
+
+async def _send_to_employee(employee_id: str, event: dict[str, Any]) -> None:
+    sockets = list(_notification_connections.get(employee_id, []))
+    dead = []
+    for ws in sockets:
+        try:
+            await ws.send_json(event)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        await unregister_notification_socket(employee_id, ws)
+
+
+def broadcast_to_employee_threadsafe(employee_id: str, event: dict[str, Any]) -> None:
+    """
+    Same fire-and-forget/thread-safe contract as broadcast_threadsafe()
+    above, but targeted at just the given employee's open socket(s)
+    instead of every connected dashboard. Used by
+    app/notifications/services.py::notify_employee() so a new
+    notification reaches an already-open tab the instant it's written,
+    instead of waiting for the frontend's next poll. No-ops quietly if
+    that employee has no socket open right now (they'll just see it on
+    next login/GET /notifications/my) or before the app has finished
+    starting up.
+    """
+    if _main_loop is None or not employee_id:
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(
+            _send_to_employee(str(employee_id), event), _main_loop
+        )
+    except Exception as e:
+        logger.error(f"Failed to send realtime notification to {employee_id}: {e}")

@@ -4,6 +4,7 @@ from fastapi import HTTPException
 
 from app.core.database import supabase_admin
 from app.core.responses import success_response
+from app.core import realtime
 from app.core.exceptions import bad_request, internal_server_error, not_found
 from app.core.logger import logger
 from app.core.helpers.employee_helper import get_employee_id_for_auth_user
@@ -345,6 +346,18 @@ def notify_employee(
     except Exception as e:
         logger.error(f"Failed to send notification to {employee_id}: {e}")
         return None
+
+    # Push it to any open tab/socket for this employee right away -- see
+    # app/core/realtime.py::broadcast_to_employee_threadsafe(). Safe to
+    # call from the sync callers of notify_employee() (leaves, attendance,
+    # etc). No-ops quietly if the employee has no socket open right now;
+    # they'll still see it via GET /notifications/my on next load.
+    try:
+        realtime.broadcast_to_employee_threadsafe(
+            str(employee_id), {"type": "notification", "notification": row}
+        )
+    except Exception as e:
+        logger.error(f"Failed to push realtime notification to {employee_id}: {e}")
 
     # "Email notifications" toggle (Settings > Notifications) -- send a
     # copy of this same notification by email if the employee has opted
