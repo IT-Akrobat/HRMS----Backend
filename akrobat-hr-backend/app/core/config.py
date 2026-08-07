@@ -83,6 +83,7 @@ PEXELS_SEARCH_QUERY = os.getenv(
 ONEMAP_EMAIL = os.getenv("ONEMAP_EMAIL")
 ONEMAP_PASSWORD = os.getenv("ONEMAP_PASSWORD")
 
+
 # ---------------------------------------------------------------------
 # Web Push (see app/core/push.py, app/push_subscriptions)
 # ---------------------------------------------------------------------
@@ -93,8 +94,26 @@ ONEMAP_PASSWORD = os.getenv("ONEMAP_PASSWORD")
 # and set them as env vars. If unset, push sends are skipped (logged,
 # not raised) and every other notification path keeps working exactly
 # as before.
+def _normalize_vapid_private_key(raw: str | None) -> str | None:
+    """
+    Host env-var UIs (Render included) are inconsistent about how a
+    multi-line PEM block survives copy/paste -- literal backslash-n
+    sequences instead of real newlines, a stray wrapping quote, or
+    leading/trailing whitespace all produce the same cryptography
+    error at push-send time ("ASN.1 parsing error: invalid length")
+    with no indication of which of those it actually was. Normalize
+    all three here instead of debugging it via production logs.
+    """
+    if not raw:
+        return raw
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+        raw = raw[1:-1]
+    return raw.replace("\\n", "\n")
+
+
 VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY")
-VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY")
+VAPID_PRIVATE_KEY = _normalize_vapid_private_key(os.getenv("VAPID_PRIVATE_KEY"))
 # Web Push requires a contact per RFC 8292 so push services can reach
 # you about a misbehaving sender -- any mailto: works.
 VAPID_CLAIMS_EMAIL = os.getenv("VAPID_CLAIMS_EMAIL", "mailto:admin@akrobat.com")
