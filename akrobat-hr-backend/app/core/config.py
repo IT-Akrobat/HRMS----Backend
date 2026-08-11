@@ -22,6 +22,20 @@ SUPABASE_SERVICE_ROLE_KEY = get_env("SUPABASE_SERVICE_ROLE_KEY")
 
 SUPABASE_JWT_SECRET = get_env("SUPABASE_JWT_SECRET")
 
+# ---------------------------------------------------------------------
+# Documents module — file storage (see app/documents/services.py)
+# ---------------------------------------------------------------------
+# Supabase Storage bucket that self-service document uploads (the "+" on
+# My Profile > Documents Summary) are written to. Create this bucket in
+# the Supabase dashboard (Storage) as PRIVATE — documents are treated as
+# confidential (see sql/006_document_permissions_seed.sql) and must only
+# ever be served back out through the authenticated
+# GET /documents/{id}/file and GET /documents/download-all endpoints,
+# never a public bucket URL. Read with os.getenv (not get_env()) so a
+# missing var doesn't block the whole app from starting — only the
+# Documents upload/download endpoints would fail until it's set.
+SUPABASE_DOCUMENTS_BUCKET = os.getenv("SUPABASE_DOCUMENTS_BUCKET", "employee-documents")
+
 APP_NAME = os.getenv("APP_NAME", "Akrobat HRMS")
 
 APP_VERSION = os.getenv("APP_VERSION", "1.0.0")
