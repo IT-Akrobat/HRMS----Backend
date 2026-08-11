@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 
 from fastapi import HTTPException
 
@@ -32,33 +32,6 @@ def _row_to_api(row: dict) -> dict:
     if "message" in row:
         row = {**row, "description": row.pop("message")}
     return row
-
-
-# =========================
-# AUTO-CLEANUP OF EXPIRED ANNOUNCEMENTS
-# =========================
-#
-# get_active_announcements() already filters end_date >= today, so an
-# expired announcement stops showing on every dashboard on its own --
-# but the row itself stuck around forever in the "all announcements"
-# list (management screens, GET /) and in the table. This physically
-# deletes any announcement whose end_date has passed (e.g. one created
-# with end_date = Aug 10 gets removed starting Aug 11).
-#
-# There's no background job runner in this backend, so rather than add
-# one just for this, cleanup piggybacks on the read paths that already
-# run constantly (every dashboard load hits /announcements/active) --
-# the first read after an announcement expires is what triggers its
-# deletion, typically within seconds of it going stale. Wrapped so a
-# failed cleanup never breaks the read it's attached to.
-
-
-def _delete_expired_announcements():
-    try:
-        today = str(date.today())
-        supabase_admin.table("announcements").delete().lt("end_date", today).execute()
-    except Exception as e:
-        logger.error(f"Failed to clean up expired announcements: {e}")
 
 
 # =========================
@@ -138,8 +111,6 @@ def get_announcements():
 
     try:
 
-        _delete_expired_announcements()
-
         response = supabase_admin.table("announcements").select("""
             *,
             employees(
@@ -167,15 +138,22 @@ def get_active_announcements():
 
     try:
 
-        _delete_expired_announcements()
+        today = date.today()
 
-        today = str(date.today())
+        # "Active" here means still current OR ended within the last week —
+        # Employee/Manager/HR (the only callers of this endpoint; Super
+        # Admin uses GET /announcements/ instead, see routes.py) should
+        # keep seeing an announcement for a 7-day grace period after its
+        # end_date before it drops off their dashboard, instead of it
+        # disappearing the instant end_date passes.
+        cutoff = str(today - timedelta(days=7))
+        today_str = str(today)
 
         response = (
             supabase_admin.table("announcements")
             .select("*")
-            .lte("start_date", today)
-            .gte("end_date", today)
+            .lte("start_date", today_str)
+            .gte("end_date", cutoff)
             .order("created_at", desc=True)
             .execute()
         )
