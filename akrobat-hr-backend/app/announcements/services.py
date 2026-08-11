@@ -35,6 +35,33 @@ def _row_to_api(row: dict) -> dict:
 
 
 # =========================
+# AUTO-CLEANUP OF EXPIRED ANNOUNCEMENTS
+# =========================
+#
+# get_active_announcements() already filters end_date >= today, so an
+# expired announcement stops showing on every dashboard on its own --
+# but the row itself stuck around forever in the "all announcements"
+# list (management screens, GET /) and in the table. This physically
+# deletes any announcement whose end_date has passed (e.g. one created
+# with end_date = Aug 10 gets removed starting Aug 11).
+#
+# There's no background job runner in this backend, so rather than add
+# one just for this, cleanup piggybacks on the read paths that already
+# run constantly (every dashboard load hits /announcements/active) --
+# the first read after an announcement expires is what triggers its
+# deletion, typically within seconds of it going stale. Wrapped so a
+# failed cleanup never breaks the read it's attached to.
+
+
+def _delete_expired_announcements():
+    try:
+        today = str(date.today())
+        supabase_admin.table("announcements").delete().lt("end_date", today).execute()
+    except Exception as e:
+        logger.error(f"Failed to clean up expired announcements: {e}")
+
+
+# =========================
 # CREATE ANNOUNCEMENT
 # =========================
 
@@ -111,6 +138,8 @@ def get_announcements():
 
     try:
 
+        _delete_expired_announcements()
+
         response = supabase_admin.table("announcements").select("""
             *,
             employees(
@@ -137,6 +166,8 @@ def get_announcements():
 def get_active_announcements():
 
     try:
+
+        _delete_expired_announcements()
 
         today = str(date.today())
 
