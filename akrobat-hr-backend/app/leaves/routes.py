@@ -24,6 +24,7 @@ from app.leaves.policy_services import (
     get_replacement_leave_credits,
     generate_yearly_leave_balances,
     recompute_annual_leave_tenure_tiers,
+    get_my_leave_entitlements,
 )
 from app.core.helpers.employee_helper import get_employee_id_for_auth_user
 
@@ -55,6 +56,21 @@ def create_leave(
 @router.get("/my")
 def my_leaves(user=Depends(get_current_user)):
     return get_my_leaves(user.id)
+
+
+# ==========================================
+# GET MY LEAVE ENTITLEMENTS (self-service — own eligibility + balances)
+# ==========================================
+# Backs the "Leave Type Entitlements" panel on the Apply Leave screen.
+# Only returns leave types this employee is actually eligible for
+# (leave_eligibility_rules), with each type's real total/used/remaining
+# days pulled from their own leave_balances / tier / replacement-credit
+# records — never a one-size-fits-all constant.
+
+
+@router.get("/my-entitlements")
+def my_leave_entitlements(user=Depends(get_current_user)):
+    return get_my_leave_entitlements(user.id)
 
 
 # ==========================================

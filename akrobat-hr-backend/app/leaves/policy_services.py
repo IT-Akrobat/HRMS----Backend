@@ -28,7 +28,10 @@ from app.core.responses import success_response
 from app.core.logger import logger
 from app.core.exceptions import bad_request, internal_server_error, not_found
 from app.core.audit import record_audit_log
-from app.core.helpers.employee_helper import is_field_employee
+from app.core.helpers.employee_helper import (
+    is_field_employee,
+    get_employee_id_for_auth_user,
+)
 
 leave_type_repo = SupabaseRepository("leave_types")
 tier_repo = SupabaseRepository("leave_policy_tiers")
@@ -585,6 +588,119 @@ def recompute_annual_leave_tenure_tiers(year: Optional[int] = None, current_user
     except Exception as e:
         logger.exception(e)
         internal_server_error("Unable to recompute Annual Leave tenure tiers.")
+
+
+# ==========================================
+# MY LEAVE ENTITLEMENTS (self-service — "Apply Leave" screen)
+# ==========================================
+# This is what actually backs the "Leave Type Entitlements" panel on the
+# employee Apply Leave page. It replaces the old frontend approach of a
+# hardcoded LEAVE_TYPES list applied identically to every employee
+# (which is why Maternity Leave used to show up for male employees —
+# the UI never asked the backend who was eligible for what, it just
+# rendered the same static array for everyone). Every number here comes
+# from the real policy engine: leave_eligibility_rules decides *whether*
+# an employee sees a leave type at all, and leave_balances / tier /
+# replacement-credit tables decide *how many* days.
+
+
+def get_my_leave_entitlements(auth_user_id: str):
+    try:
+        employee_id = get_employee_id_for_auth_user(auth_user_id)
+        if not employee_id:
+            return success_response(
+                message="Leave entitlements fetched successfully.", data=[]
+            )
+
+        employee = employee_repo.get_by_id_or_404(employee_id, "Employee not found.")
+
+        leave_types, _total = leave_type_repo.list(
+            select="id, leave_name, default_days, entitlement_mode, is_paid",
+            order_by="leave_name",
+        )
+
+        current_year = datetime.now(timezone.utc).year
+        entitlements = []
+
+        for leave_type in leave_types:
+            leave_type_id = leave_type["id"]
+            leave_name = (leave_type.get("leave_name") or "").strip().upper()
+            mode = leave_type.get("entitlement_mode")
+
+            # Gate on eligibility first (gender / marital_status /
+            # nationality / employee_type). An employee who isn't
+            # eligible for a leave type never sees it here, full stop —
+            # this is the fix for e.g. Maternity Leave rendering for a
+            # male employee.
+            eligible, reason = evaluate_leave_eligibility(employee, leave_type_id)
+            if not eligible:
+                continue
+
+            entry = {
+                "leave_type_id": leave_type_id,
+                "leave_name": leave_type.get("leave_name"),
+                "entitlement_mode": mode,
+                "is_paid": leave_type.get("is_paid"),
+                "total_days": None,
+                "used_days": None,
+                "remaining_days": None,
+                "unlimited": False,
+            }
+
+            if mode == "not_a_balance":
+                # Unpaid Leave — no balance, no cap.
+                entry["unlimited"] = True
+
+            elif mode == "event" and leave_name == NATIONAL_SERVICE_LEAVE:
+                # NS Leave — no pre-set balance, no cap.
+                entry["unlimited"] = True
+
+            elif mode == "event" and leave_name == REPLACEMENT_LEAVE:
+                available = get_unused_replacement_credit_days(employee_id)
+                entry["total_days"] = available
+                entry["used_days"] = 0
+                entry["remaining_days"] = available
+
+            elif mode == "event":
+                entry["unlimited"] = True
+
+            else:
+                # fixed / tiered — this employee's real, per-person
+                # balance row for the current year, not a generic
+                # leave_types.default_days constant.
+                balance = balance_repo.find_one(
+                    {
+                        "employee_id": employee_id,
+                        "leave_type_id": leave_type_id,
+                        "year": current_year,
+                    },
+                    select="total_days, used_days, remaining_days",
+                )
+                if balance:
+                    entry["total_days"] = balance.get("total_days") or 0
+                    entry["used_days"] = balance.get("used_days") or 0
+                    entry["remaining_days"] = balance.get("remaining_days") or 0
+                else:
+                    # Eligible, but HR hasn't generated/assigned a
+                    # balance for this employee yet (e.g. tiered type
+                    # with no tier assignment, or yearly job not run
+                    # yet). Surface as 0/0 rather than silently
+                    # inventing the leave_types.default_days figure —
+                    # that constant is a policy ceiling, not this
+                    # person's entitlement.
+                    entry["total_days"] = 0
+                    entry["used_days"] = 0
+                    entry["remaining_days"] = 0
+
+            entitlements.append(entry)
+
+        return success_response(
+            message="Leave entitlements fetched successfully.", data=entitlements
+        )
+
+    except Exception as e:
+        logger.exception(e)
+        internal_server_error("Unable to fetch leave entitlements.")
 
 
 # ==========================================
