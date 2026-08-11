@@ -538,11 +538,25 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
         # leave_tier() itself doesn't check eligibility (HR may be
         # pre-configuring ahead of a marital-status update), so gate it
         # here based on the fields just saved above.
+        #
+        # assigned_by must be an employees.id (employee_leave_tier.
+        # assigned_by -> employees(id) fk), not the Supabase auth uid
+        # that `current_user.id` actually is -- passing the raw auth id
+        # straight through used to 409 on every create with "Key
+        # (assigned_by)=(...) is not present in table employees" the
+        # moment the caller's auth id wasn't itself a row in
+        # `employees` (e.g. the bootstrapped Super Admin login).
+        # get_employee_id_for_auth_user() does the auth-id -> employee-
+        # id lookup and returns None (not an error) when there's no
+        # linked employee row, which the nullable assigned_by column
+        # accepts fine.
         assign_employee_leave_tier(
             employee_data["id"],
             ANNUAL_LEAVE,
             str(data.annual_leave_tier_id),
-            assigned_by=getattr(current_user, "id", None),
+            assigned_by=get_employee_id_for_auth_user(
+                getattr(current_user, "id", None)
+            ),
         )
 
         if data.childcare_leave_tier_id:
@@ -555,7 +569,9 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
                     employee_data["id"],
                     CHILDCARE_LEAVE,
                     str(data.childcare_leave_tier_id),
-                    assigned_by=getattr(current_user, "id", None),
+                    assigned_by=get_employee_id_for_auth_user(
+                        getattr(current_user, "id", None)
+                    ),
                 )
 
         supabase_admin.table("user_profiles").insert(
@@ -694,7 +710,9 @@ def update_employee(
                 employee_id,
                 ANNUAL_LEAVE,
                 str(annual_leave_tier_id),
-                assigned_by=getattr(current_user, "id", None),
+                assigned_by=get_employee_id_for_auth_user(
+                    getattr(current_user, "id", None)
+                ),
             )
 
         if childcare_leave_tier_id:
@@ -707,7 +725,9 @@ def update_employee(
                     employee_id,
                     CHILDCARE_LEAVE,
                     str(childcare_leave_tier_id),
-                    assigned_by=getattr(current_user, "id", None),
+                    assigned_by=get_employee_id_for_auth_user(
+                        getattr(current_user, "id", None)
+                    ),
                 )
             else:
                 logger.info(
