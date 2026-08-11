@@ -149,7 +149,18 @@ def get_employee_leave_tier(employee_id: str, leave_type_id: str) -> Optional[di
 
 def _employee_field_value(employee: dict, field: str) -> Optional[str]:
     if field == "nationality":
-        return employee.get("nationality")
+        # employees.nationality now stores a real country name (the
+        # create/edit form is a full country picker), not a
+        # Singaporean/Foreigner category. The only rule seeded against
+        # this field is nationality='Foreigner' -> not eligible (NS
+        # Leave), so normalize here: Singapore nationals stay
+        # "Singapore" (never matches that rule), everyone else
+        # collapses to "Foreigner" so the existing rule still catches
+        # them regardless of which country they actually picked.
+        raw = employee.get("nationality")
+        if raw is None:
+            return None
+        return "Singapore" if raw.strip().lower() == "singapore" else "Foreigner"
     if field == "marital_status":
         return employee.get("marital_status")
     if field == "gender":
