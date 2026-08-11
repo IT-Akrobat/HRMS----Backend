@@ -117,7 +117,11 @@ def assign_employee_leave_tier(
     if leave_type.get("entitlement_mode") != "tiered":
         bad_request(f"{leave_name} is not a tiered leave type.")
 
-    tier = tier_repo.get_by_id(str(tier_id), select="id, leave_type_id")
+    # NOTE: select now also pulls tier_name/days -- needed below to push
+    # the new day count into this year's leave_balances row.
+    tier = tier_repo.get_by_id(
+        str(tier_id), select="id, leave_type_id, tier_name, days"
+    )
     if not tier or str(tier.get("leave_type_id")) != str(leave_type["id"]):
         bad_request(f"Invalid tier for {leave_name}.")
 
@@ -133,9 +137,69 @@ def assign_employee_leave_tier(
     }
 
     if existing:
-        return employee_tier_repo.update(existing["id"], payload)
+        result = employee_tier_repo.update(existing["id"], payload)
+    else:
+        result = employee_tier_repo.create(payload)
 
-    return employee_tier_repo.create(payload)
+    # Keep THIS YEAR's leave_balances row in sync with the tier change.
+    # Previously this function only upserted employee_leave_tier, so
+    # editing an employee's Annual/Childcare Leave tier (e.g. Childcare
+    # 6 -> 2 days) never touched their existing leave_balances row --
+    # the employee kept seeing the OLD tier's total/remaining days
+    # (and requests kept validating against it) until someone re-ran
+    # the yearly generate-balances job company-wide. That's the "edit
+    # it, doesn't update" bug: sync it here so the change is immediate.
+    _sync_leave_balance_for_tier(employee_id, leave_type, tier)
+
+    return result
+
+
+def _sync_leave_balance_for_tier(employee_id: str, leave_type: dict, tier: dict):
+    """
+    Push a (re)assigned tier's day count into the employee's current
+    year leave_balances row immediately, instead of waiting for the
+    next generate_yearly_leave_balances() run. Preserves used_days so
+    remaining_days is simply recomputed from the new total.
+    """
+
+    leave_name = (leave_type.get("leave_name") or "").strip().upper()
+
+    if leave_name == ANNUAL_LEAVE and tier.get("tier_name") == TENURE_TIER_NAME:
+        employee = employee_repo.get_by_id(employee_id, select="joining_date")
+        new_days = compute_annual_leave_10_day_days(
+            employee.get("joining_date") if employee else None
+        )
+    else:
+        new_days = tier.get("days") or 0
+
+    current_year = datetime.now(timezone.utc).year
+
+    existing_balance = balance_repo.find_one(
+        {
+            "employee_id": employee_id,
+            "leave_type_id": leave_type["id"],
+            "year": current_year,
+        },
+        select="id, used_days",
+    )
+
+    if existing_balance:
+        used = existing_balance.get("used_days") or 0
+        balance_repo.update(
+            existing_balance["id"],
+            {"total_days": new_days, "remaining_days": new_days - used},
+        )
+    else:
+        balance_repo.create(
+            {
+                "employee_id": employee_id,
+                "leave_type_id": leave_type["id"],
+                "year": current_year,
+                "total_days": new_days,
+                "used_days": 0,
+                "remaining_days": new_days,
+            }
+        )
 
 
 def get_employee_leave_tier(employee_id: str, leave_type_id: str) -> Optional[dict]:
