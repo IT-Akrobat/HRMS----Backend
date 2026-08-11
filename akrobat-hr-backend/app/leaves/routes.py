@@ -6,6 +6,7 @@ from app.leaves.schemas import (
     AssignLeaveTierRequest,
     CreditReplacementLeaveRequest,
     GenerateYearlyBalancesRequest,
+    GrantLeaveBalanceRequest,
 )
 
 from app.leaves.services import (
@@ -25,6 +26,7 @@ from app.leaves.policy_services import (
     generate_yearly_leave_balances,
     recompute_annual_leave_tenure_tiers,
     get_my_leave_entitlements,
+    grant_leave_balance_days,
 )
 from app.core.helpers.employee_helper import get_employee_id_for_auth_user
 
@@ -184,6 +186,28 @@ def replacement_credits(
     employee_id: str, user=Depends(require_permission("VIEW_LEAVE_REQUESTS"))
 ):
     return get_replacement_leave_credits(employee_id)
+
+
+@router.post("/policy/grant-balance")
+def grant_balance(
+    data: GrantLeaveBalanceRequest,
+    request: Request,
+    user=Depends(require_permission("EDIT_EMPLOYEE")),
+):
+    """HR/boss: grant an employee a specific number of days for a
+    discretionary 'fixed' leave type — e.g. Compassionate Leave, which
+    per company policy has no set company-wide amount and is decided
+    case by case ("based on Boss, how many he will give to employee").
+    Not for Annual/Childcare Leave (use tier assignment) or
+    Replacement/NS Leave (their own event mechanisms)."""
+    return grant_leave_balance_days(
+        str(data.employee_id),
+        data.leave_type,
+        data.days,
+        granted_by=get_employee_id_for_auth_user(user.id),
+        year=data.year,
+        request=request,
+    )
 
 
 @router.post("/policy/generate-yearly-balances")

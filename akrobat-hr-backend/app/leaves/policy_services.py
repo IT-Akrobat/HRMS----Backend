@@ -591,6 +591,108 @@ def recompute_annual_leave_tenure_tiers(year: Optional[int] = None, current_user
 
 
 # ==========================================
+# AD HOC LEAVE BALANCE GRANTS — Compassionate Leave (boss's discretion)
+# ==========================================
+# Compassionate Leave has no company-wide default_days (it's 0 in
+# leave_types) because, per the client, it isn't a policy number at
+# all -- "compassionate leave, this is based on Boss, how many he will
+# give to employee" -- it's decided case by case, per employee, by
+# whoever approves it. There was previously no way to actually act on
+# that decision: HR had no way to grant a specific employee a specific
+# number of Compassionate Leave days, so the balance stayed 0/0
+# forever. This adds that grant, modelled the same way as
+# credit_replacement_leave (an explicit, audited HR action) but adding
+# straight to a leave_balances row rather than to an event-credit
+# table, since Compassionate Leave is consumed like any other
+# fixed-mode balance once granted.
+#
+# Generic by design (works for any 'fixed' mode leave type, not only
+# Compassionate Leave) in case another ad hoc/discretionary leave type
+# is added later -- but tiered/event/not_a_balance types have their own
+# dedicated mechanisms (tier assignment / replacement credits / no
+# balance at all) and are rejected here on purpose.
+
+
+def grant_leave_balance_days(
+    employee_id: str,
+    leave_name: str,
+    days: int,
+    granted_by: Optional[str] = None,
+    year: Optional[int] = None,
+    request=None,
+):
+    try:
+        if days <= 0:
+            bad_request("Days granted must be a positive number.")
+
+        employee = employee_repo.get_by_id_or_404(employee_id, "Employee not found.")
+        leave_type = get_leave_type_or_404(leave_name)
+
+        if leave_type.get("entitlement_mode") != "fixed":
+            bad_request(
+                f"{leave_name} isn't a manually-granted leave type. "
+                "Tiered types use tier assignment, event types use their "
+                "own credit mechanism."
+            )
+
+        eligible, reason = evaluate_leave_eligibility(employee, leave_type["id"])
+        if not eligible:
+            bad_request(reason or f"Employee is not eligible for {leave_name}.")
+
+        target_year = year or datetime.now(timezone.utc).year
+
+        existing = balance_repo.find_one(
+            {
+                "employee_id": employee_id,
+                "leave_type_id": leave_type["id"],
+                "year": target_year,
+            },
+            select="id, total_days, used_days, remaining_days",
+        )
+
+        if existing:
+            new_total = (existing.get("total_days") or 0) + days
+            new_remaining = (existing.get("remaining_days") or 0) + days
+            balance = balance_repo.update(
+                existing["id"],
+                {"total_days": new_total, "remaining_days": new_remaining},
+            )
+        else:
+            balance = balance_repo.create(
+                {
+                    "employee_id": employee_id,
+                    "leave_type_id": leave_type["id"],
+                    "year": target_year,
+                    "total_days": days,
+                    "used_days": 0,
+                    "remaining_days": days,
+                }
+            )
+
+        record_audit_log(
+            module="LEAVE",
+            action="GRANT_LEAVE_BALANCE",
+            performed_by=granted_by,
+            target_employee_id=employee_id,
+            record_id=balance.get("id"),
+            description=(
+                f"Granted {days} day(s) of {leave_name.title()} for "
+                f"{target_year} (discretionary)."
+            ),
+            new_values=balance,
+            request=request,
+        )
+
+        return success_response(
+            message=f"{days} day(s) of {leave_name.title()} granted.", data=balance
+        )
+
+    except Exception as e:
+        logger.exception(e)
+        internal_server_error("Unable to grant leave balance.")
+
+
+# ==========================================
 # MY LEAVE ENTITLEMENTS (self-service — "Apply Leave" screen)
 # ==========================================
 # This is what actually backs the "Leave Type Entitlements" panel on the
@@ -645,6 +747,7 @@ def get_my_leave_entitlements(auth_user_id: str):
                 "used_days": None,
                 "remaining_days": None,
                 "unlimited": False,
+                "tier_not_assigned": False,
             }
 
             if mode == "not_a_balance":
@@ -680,17 +783,27 @@ def get_my_leave_entitlements(auth_user_id: str):
                     entry["total_days"] = balance.get("total_days") or 0
                     entry["used_days"] = balance.get("used_days") or 0
                     entry["remaining_days"] = balance.get("remaining_days") or 0
+                elif mode == "fixed":
+                    # No balance row yet (HR hasn't run the yearly
+                    # generator), but "fixed" means every eligible
+                    # employee gets the exact same default_days — there's
+                    # no per-person ambiguity to guess at, unlike tiered.
+                    # Safe to show default_days as the entitlement even
+                    # before a leave_balances row exists.
+                    default_days = leave_type.get("default_days") or 0
+                    entry["total_days"] = default_days
+                    entry["used_days"] = 0
+                    entry["remaining_days"] = default_days
                 else:
-                    # Eligible, but HR hasn't generated/assigned a
-                    # balance for this employee yet (e.g. tiered type
-                    # with no tier assignment, or yearly job not run
-                    # yet). Surface as 0/0 rather than silently
-                    # inventing the leave_types.default_days figure —
-                    # that constant is a policy ceiling, not this
-                    # person's entitlement.
+                    # tiered, no tier assigned / no balance yet — we
+                    # genuinely don't know this employee's number (could
+                    # be 21, 20, 14, 11, or 10 days for Annual Leave), so
+                    # show 0 rather than guessing, and let generate the
+                    # balances / assign a tier fix it properly.
                     entry["total_days"] = 0
                     entry["used_days"] = 0
                     entry["remaining_days"] = 0
+                    entry["tier_not_assigned"] = True
 
             entitlements.append(entry)
 

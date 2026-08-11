@@ -41,3 +41,10 @@ class CreditReplacementLeaveRequest(BaseModel):
 
 class GenerateYearlyBalancesRequest(BaseModel):
     year: Optional[int] = None
+
+
+class GrantLeaveBalanceRequest(BaseModel):
+    employee_id: UUID
+    leave_type: str  # e.g. "COMPASSIONATE LEAVE" — must be a 'fixed' mode type
+    days: int
+    year: Optional[int] = None
