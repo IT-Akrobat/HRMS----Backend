@@ -56,11 +56,13 @@ def get_all(
 
 
 # ==========================================
-# SELF-SERVICE UPLOAD (Employee / Manager / HR Admin / Super Admin —
-# any authenticated user; always uploads against the CALLER'S OWN
+# SELF-SERVICE UPLOAD (Employee / Manager / HR Admin — any authenticated
+# user EXCEPT Super Admin; always uploads against the CALLER'S OWN
 # employee record. This is the "+" button on My Profile > Documents
 # Summary — not a way to add documents for someone else, and it does
-# NOT require CREATE_DOCUMENT the way POST / above does.)
+# NOT require CREATE_DOCUMENT the way POST / above does. Super Admin is
+# rejected server-side in upload_my_document() even if called directly;
+# the button is also hidden for them in MyProfile.jsx.)
 # ==========================================
 
 

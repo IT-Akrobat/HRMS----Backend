@@ -16,17 +16,45 @@ from app.core.audit import record_audit_log
 from app.core.rbac import has_permission
 from app.core.database import supabase_admin
 from app.core.helpers.employee_helper import get_employee_id_for_auth_user
+from app.core.constants import ADMIN
 
 document_repo = SupabaseRepository("documents")
+
+
+# ==========================================
+# Role lookup for the self-service upload gate below. Super Admin is
+# deliberately excluded from "+" upload on My Profile > Documents
+# Summary — they get download-only access there (see MyProfile.jsx and
+# app/documents/routes.py POST /documents/my). This mirrors the
+# role_name lookup in app/core/permissions.py::require_role so the
+# backend enforces the same rule the frontend hides in the UI.
+# ==========================================
+
+
+def _is_super_admin(auth_user_id: str) -> bool:
+    response = (
+        supabase_admin.table("user_profiles")
+        .select("role_id, roles(role_name)")
+        .eq("auth_user_id", auth_user_id)
+        .single()
+        .execute()
+    )
+
+    role_data = (response.data or {}).get("roles") if response.data else None
+    role_name = (role_data or {}).get("role_name")
+
+    return role_name == ADMIN
+
 
 DOCUMENT_SELECT = "*, employees(employee_id, full_name)"
 
 # ==========================================
 # SELF-SERVICE UPLOAD — allowed file types
 # ==========================================
-# Employee / Manager / HR Admin / Super Admin (any authenticated user,
-# uploading their OWN document from My Profile > Documents Summary's "+"
-# button). Keep this in sync with ACCEPTED_DOCUMENT_TYPES on the frontend
+# Employee / Manager / HR Admin only (NOT Super Admin — see
+# _is_super_admin() gate in upload_my_document below) uploading their OWN
+# document from My Profile > Documents Summary's "+" button. Keep this in
+# sync with ACCEPTED_DOCUMENT_TYPES on the frontend
 # (src/services/documentsService.js).
 ALLOWED_DOCUMENT_TYPES = {
     ".pdf": "application/pdf",
@@ -160,6 +188,12 @@ def upload_my_document(
     request: Optional[Request] = None,
 ):
     try:
+        if _is_super_admin(current_user.id):
+            forbidden(
+                "Super Admin does not upload documents here — use "
+                "download from Documents Summary or the Documents page instead."
+            )
+
         employee_id = get_employee_id_for_auth_user(current_user.id)
 
         if not employee_id:
