@@ -1,6 +1,12 @@
 from fastapi import APIRouter, Depends, Query, Request
 
-from app.leaves.schemas import CreateLeaveRequest, UpdateLeaveStatusRequest
+from app.leaves.schemas import (
+    CreateLeaveRequest,
+    UpdateLeaveStatusRequest,
+    AssignLeaveTierRequest,
+    CreditReplacementLeaveRequest,
+    GenerateYearlyBalancesRequest,
+)
 
 from app.leaves.services import (
     apply_leave,
@@ -10,11 +16,21 @@ from app.leaves.services import (
     get_team_leaves,
     update_leave_status,
 )
+from app.leaves.policy_services import (
+    get_tiers_for_leave_type,
+    assign_employee_leave_tier,
+    check_leave_eligibility,
+    credit_replacement_leave,
+    get_replacement_leave_credits,
+    generate_yearly_leave_balances,
+    recompute_annual_leave_tenure_tiers,
+)
+from app.core.helpers.employee_helper import get_employee_id_for_auth_user
 
 from app.core.security import get_current_user
 from app.core.rbac import require_permission
 from app.core.permissions import require_role
-from app.core.constants import ADMIN
+from app.core.constants import ADMIN, HR
 
 router = APIRouter(prefix="/leaves", tags=["Leaves"])
 
@@ -91,3 +107,85 @@ def update_status(
     user=Depends(require_role([ADMIN])),
 ):
     return update_leave_status(leave_id, data, auth_user_id=user.id, request=request)
+
+
+# ==========================================
+# LEAVE POLICY ENGINE (HR / Admin)
+# ==========================================
+
+
+@router.get("/policy/tiers/{leave_name}")
+def leave_policy_tiers(
+    leave_name: str, user=Depends(require_permission("VIEW_LEAVE_REQUESTS"))
+):
+    """Tier options for a tiered leave type, e.g. ANNUAL LEAVE / CHILDCARE LEAVE.
+    Used to populate the Annual Leave / Childcare Leave tier dropdowns on
+    the Employee create/edit form."""
+    return get_tiers_for_leave_type(leave_name)
+
+
+@router.post("/policy/assign-tier")
+def assign_tier(
+    data: AssignLeaveTierRequest,
+    user=Depends(require_permission("EDIT_EMPLOYEE")),
+):
+    return assign_employee_leave_tier(
+        str(data.employee_id),
+        data.leave_type,
+        str(data.tier_id),
+        assigned_by=get_employee_id_for_auth_user(user.id),
+    )
+
+
+@router.get("/policy/eligibility/{employee_id}/{leave_name}")
+def leave_eligibility(
+    employee_id: str,
+    leave_name: str,
+    user=Depends(require_permission("VIEW_LEAVE_REQUESTS")),
+):
+    return check_leave_eligibility(employee_id, leave_name)
+
+
+@router.post("/policy/replacement-credits")
+def credit_replacement(
+    data: CreditReplacementLeaveRequest,
+    request: Request,
+    user=Depends(require_permission("EDIT_EMPLOYEE")),
+):
+    """HR: credit one Replacement Leave day for a public holiday that
+    fell on a Saturday. Gated to office employees — field employees are
+    excluded via leave_eligibility_rules."""
+    return credit_replacement_leave(
+        str(data.employee_id),
+        data.public_holiday_date,
+        credited_by=get_employee_id_for_auth_user(user.id),
+        request=request,
+    )
+
+
+@router.get("/policy/replacement-credits/{employee_id}")
+def replacement_credits(
+    employee_id: str, user=Depends(require_permission("VIEW_LEAVE_REQUESTS"))
+):
+    return get_replacement_leave_credits(employee_id)
+
+
+@router.post("/policy/generate-yearly-balances")
+def generate_yearly_balances(
+    data: GenerateYearlyBalancesRequest,
+    user=Depends(require_role([ADMIN, HR])),
+):
+    """HR/Admin-triggered batch job — run once a year (or re-run safely
+    any time) to (re)populate leave_balances for every active employee
+    across all fixed/tiered leave types."""
+    return generate_yearly_leave_balances(data.year, current_user=user)
+
+
+@router.post("/policy/recompute-annual-tenure")
+def recompute_annual_tenure(
+    data: GenerateYearlyBalancesRequest,
+    user=Depends(require_role([ADMIN, HR])),
+):
+    """HR/Admin-triggered — recompute the +1 day/year (capped at 14)
+    tenure bonus for employees on the Annual Leave 10-day tier."""
+    return recompute_annual_leave_tenure_tiers(data.year, current_user=user)

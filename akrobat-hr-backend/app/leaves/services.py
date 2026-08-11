@@ -18,6 +18,11 @@ from app.core.constants import ADMIN
 from app.core.database import supabase_admin
 from app.notifications.services import notify_employee
 from app.notification_preferences.services import get_preference
+from app.leaves.policy_services import (
+    evaluate_leave_eligibility,
+    validate_leave_request_against_entitlement,
+    apply_entitlement_on_approval,
+)
 
 leave_repo = SupabaseRepository("leave_requests")
 leave_type_repo = SupabaseRepository("leave_types")
@@ -30,14 +35,19 @@ LEAVE_SELECT = (
 
 
 def _resolve_leave_type_id(leave_type_name: str) -> str:
+    return _resolve_leave_type(leave_type_name)["id"]
+
+
+def _resolve_leave_type(leave_type_name: str) -> dict:
     leave_type = leave_type_repo.find_one(
-        {"leave_name": leave_type_name.strip().upper()}, select="id"
+        {"leave_name": leave_type_name.strip().upper()},
+        select="id, leave_name, default_days, entitlement_mode, is_paid",
     )
 
     if not leave_type:
         bad_request(f"Unknown leave type: {leave_type_name}")
 
-    return leave_type["id"]
+    return leave_type
 
 
 # ==========================================
@@ -55,8 +65,34 @@ def apply_leave(auth_user_id: str, data, request: Optional[Request] = None):
         if data.to_date < data.from_date:
             bad_request("to_date must be on or after from_date.")
 
-        leave_type_id = _resolve_leave_type_id(data.leave_type)
+        leave_type = _resolve_leave_type(data.leave_type)
+        leave_type_id = leave_type["id"]
         total_days = (data.to_date - data.from_date).days + 1
+
+        applicant_record = employee_repo.get_by_id_or_404(
+            employee_id, "Employee not found."
+        )
+
+        # Eligibility (nationality/marital_status/gender/office-vs-field
+        # exclusions from leave_eligibility_rules) — e.g. foreigners
+        # can't apply for NS Leave, single employees can't apply for
+        # Paternity/Maternity/Childcare, field staff can't apply for
+        # Replacement Leave.
+        eligible, ineligible_reason = evaluate_leave_eligibility(
+            applicant_record, leave_type_id
+        )
+        if not eligible:
+            bad_request(ineligible_reason or f"Not eligible for {data.leave_type}.")
+
+        # Entitlement check. NS Leave and Replacement Leave are
+        # event-based (checked against leave_replacement_credits /
+        # skipped entirely for NS) rather than a leave_balances row;
+        # Unpaid Leave is never balance-checked (payroll deducts via
+        # working_days_per_week instead); fixed/tiered types must have
+        # enough remaining_days for the current year.
+        validate_leave_request_against_entitlement(
+            applicant_record, leave_type, total_days
+        )
 
         leave_data = leave_repo.create(
             {
@@ -316,6 +352,28 @@ def update_leave_status(
             # Approval history is a secondary audit trail; don't fail the
             # approval itself if this insert has an issue.
             logger.error(f"Failed to write leave_approval_history: {history_error}")
+
+        if data.status == "Approved":
+            try:
+                leave_type_full = leave_type_repo.get_by_id(
+                    existing.get("leave_type_id"),
+                    select="id, leave_name, default_days, entitlement_mode, is_paid",
+                )
+                if leave_type_full:
+                    apply_entitlement_on_approval(
+                        target_employee_id,
+                        leave_type_full,
+                        existing.get("total_days") or 0,
+                        leave_id,
+                    )
+            except Exception as entitlement_error:
+                # Don't block the approval itself over a balance/credit
+                # bookkeeping failure -- log it so HR can reconcile
+                # leave_balances / leave_replacement_credits manually.
+                logger.error(
+                    f"Failed to apply entitlement deduction for leave "
+                    f"{leave_id}: {entitlement_error}"
+                )
 
         record_audit_log(
             module="LEAVE",

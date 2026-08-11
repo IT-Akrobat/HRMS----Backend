@@ -22,6 +22,7 @@ CREATE_EMPLOYEE_EXAMPLES = {
             "password": "StrongPass123!",
             "role_id": "REPLACE_WITH_SUPER_ADMIN_ROLE_ID_FROM_GET_/roles",
             "employment_status": "Active",
+            "annual_leave_tier_id": "REPLACE_WITH_A_TIER_ID_FROM_GET_/leaves/policy/tiers/ANNUAL%20LEAVE",
         },
     },
     "super_admin_creates_hr": {
@@ -41,6 +42,7 @@ CREATE_EMPLOYEE_EXAMPLES = {
             "role_id": "REPLACE_WITH_HR_ROLE_ID_FROM_GET_/roles",
             "joining_date": "2026-07-08",
             "employment_status": "Active",
+            "annual_leave_tier_id": "REPLACE_WITH_A_TIER_ID_FROM_GET_/leaves/policy/tiers/ANNUAL%20LEAVE",
         },
     },
     "super_admin_or_hr_creates_manager": {
@@ -59,6 +61,7 @@ CREATE_EMPLOYEE_EXAMPLES = {
             "role_id": "REPLACE_WITH_MANAGER_ROLE_ID_FROM_GET_/roles",
             "joining_date": "2026-07-08",
             "employment_status": "Active",
+            "annual_leave_tier_id": "REPLACE_WITH_A_TIER_ID_FROM_GET_/leaves/policy/tiers/ANNUAL%20LEAVE",
         },
     },
     "manager_or_hr_creates_employee": {
@@ -78,6 +81,7 @@ CREATE_EMPLOYEE_EXAMPLES = {
             "role_id": "REPLACE_WITH_EMPLOYEE_ROLE_ID_FROM_GET_/roles",
             "joining_date": "2026-07-08",
             "employment_status": "Active",
+            "annual_leave_tier_id": "REPLACE_WITH_A_TIER_ID_FROM_GET_/leaves/policy/tiers/ANNUAL%20LEAVE",
         },
     },
 }

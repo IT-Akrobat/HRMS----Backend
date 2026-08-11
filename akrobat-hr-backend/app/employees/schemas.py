@@ -122,9 +122,11 @@ from datetime import date, datetime
 from typing import Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from app.core.constants import ACTIVE
+
+WORKING_DAYS_PER_WEEK_OPTIONS = (5, 5.5, 6)
 
 # ==========================================
 # Create Employee
@@ -165,6 +167,39 @@ class EmployeeCreate(BaseModel):
     work_location: Optional[str] = Field(default=None, max_length=150)
 
     profile_photo: Optional[str] = None
+
+    # Eligibility inputs for the leave policy engine (nationality/
+    # marital_status/gender feed leave_eligibility_rules — e.g.
+    # foreigners aren't eligible for NS Leave, single employees aren't
+    # eligible for Paternity/Maternity/Childcare). Previously only
+    # settable via the employee's own "My Profile" self-update; HR can
+    # now set them at creation time too, since eligibility needs to be
+    # known from day one, not just after the employee logs in once.
+    gender: Optional[str] = Field(default=None, max_length=20)
+    marital_status: Optional[str] = Field(default=None, max_length=20)
+    nationality: Optional[str] = Field(default=None, max_length=100)
+
+    # Tiered leave entitlement assignment. Annual Leave tier is
+    # required -- every employee must be on one of the 21/20/14/11/10
+    # day tiers. Childcare Leave tier is optional and only meaningful if
+    # the employee passes the CHILDCARE LEAVE eligibility rules
+    # (married); the create flow silently ignores it otherwise rather
+    # than erroring, since the UI only shows the field when eligible.
+    annual_leave_tier_id: UUID
+
+    childcare_leave_tier_id: Optional[UUID] = None
+
+    # Drives the Unpaid Leave payroll deduction (Unpaid Leave itself
+    # never gets a leave_balances row -- see
+    # app/leaves/policy_services.py). 5 / 5.5 / 6 per the Leave Info doc.
+    working_days_per_week: float = Field(default=5)
+
+    @field_validator("working_days_per_week")
+    @classmethod
+    def _validate_working_days_per_week(cls, v):
+        if v not in WORKING_DAYS_PER_WEEK_OPTIONS:
+            raise ValueError("working_days_per_week must be 5, 5.5, or 6.")
+        return v
 
 
 # ==========================================
@@ -229,6 +264,22 @@ class EmployeeUpdate(BaseModel):
     work_location: Optional[str] = Field(default=None, max_length=150)
 
     profile_photo: Optional[str] = None
+
+    gender: Optional[str] = Field(default=None, max_length=20)
+    marital_status: Optional[str] = Field(default=None, max_length=20)
+    nationality: Optional[str] = Field(default=None, max_length=100)
+
+    annual_leave_tier_id: Optional[UUID] = None
+    childcare_leave_tier_id: Optional[UUID] = None
+
+    working_days_per_week: Optional[float] = None
+
+    @field_validator("working_days_per_week")
+    @classmethod
+    def _validate_working_days_per_week(cls, v):
+        if v is not None and v not in WORKING_DAYS_PER_WEEK_OPTIONS:
+            raise ValueError("working_days_per_week must be 5, 5.5, or 6.")
+        return v
 
 
 # ==========================================

@@ -330,6 +330,13 @@ from app.core.helpers.employee_helper import (
 )
 from app.core.validators import validate_email
 from app.core.audit import record_audit_log
+from app.leaves.policy_services import (
+    assign_employee_leave_tier,
+    evaluate_leave_eligibility,
+    get_leave_type_or_404,
+    CHILDCARE_LEAVE,
+    ANNUAL_LEAVE,
+)
 
 employee_repo = SupabaseRepository("employees")
 
@@ -518,8 +525,38 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
                 "work_location": data.work_location,
                 "shift_id": resolved_shift_id,
                 "profile_photo": data.profile_photo,
+                "gender": data.gender,
+                "marital_status": data.marital_status,
+                "nationality": data.nationality,
+                "working_days_per_week": data.working_days_per_week,
             }
         )
+
+        # Annual Leave tier is required for every employee (21/20/14/
+        # 11/10 days). Childcare Leave tier is only assigned if the
+        # employee is actually eligible (married) -- assign_employee_
+        # leave_tier() itself doesn't check eligibility (HR may be
+        # pre-configuring ahead of a marital-status update), so gate it
+        # here based on the fields just saved above.
+        assign_employee_leave_tier(
+            employee_data["id"],
+            ANNUAL_LEAVE,
+            str(data.annual_leave_tier_id),
+            assigned_by=getattr(current_user, "id", None),
+        )
+
+        if data.childcare_leave_tier_id:
+            childcare_type = get_leave_type_or_404(CHILDCARE_LEAVE)
+            eligible, _reason = evaluate_leave_eligibility(
+                employee_data, childcare_type["id"]
+            )
+            if eligible:
+                assign_employee_leave_tier(
+                    employee_data["id"],
+                    CHILDCARE_LEAVE,
+                    str(data.childcare_leave_tier_id),
+                    assigned_by=getattr(current_user, "id", None),
+                )
 
         supabase_admin.table("user_profiles").insert(
             {
@@ -621,6 +658,12 @@ def update_employee(
                 "designations", update_data["designation_id"], "Designation"
             )
 
+        # Leave tier assignments aren't columns on `employees` itself --
+        # pulled out here and applied to employee_leave_tier separately,
+        # after the main employee row is updated below.
+        annual_leave_tier_id = update_data.pop("annual_leave_tier_id", None)
+        childcare_leave_tier_id = update_data.pop("childcare_leave_tier_id", None)
+
         if "shift_id" in update_data:
             validate_reference("shifts", update_data["shift_id"], "Shift")
 
@@ -637,6 +680,40 @@ def update_employee(
                 update_data[key] = str(update_data[key])
 
         updated_employee = employee_repo.update(employee_id, update_data)
+
+        # Leave tier reassignment. assign_employee_leave_tier() upserts
+        # (one row per employee+leave_type via the unique constraint), so
+        # this is safe to call whenever HR changes an employee's tier,
+        # not just at creation. Childcare Leave tier is only actually
+        # applied if the employee (post-update) passes eligibility --
+        # HR may set marital_status and the childcare tier in the same
+        # edit, so eligibility is checked against `updated_employee`,
+        # not the stale `existing_employee`.
+        if annual_leave_tier_id:
+            assign_employee_leave_tier(
+                employee_id,
+                ANNUAL_LEAVE,
+                str(annual_leave_tier_id),
+                assigned_by=getattr(current_user, "id", None),
+            )
+
+        if childcare_leave_tier_id:
+            childcare_type = get_leave_type_or_404(CHILDCARE_LEAVE)
+            eligible, _reason = evaluate_leave_eligibility(
+                updated_employee, childcare_type["id"]
+            )
+            if eligible:
+                assign_employee_leave_tier(
+                    employee_id,
+                    CHILDCARE_LEAVE,
+                    str(childcare_leave_tier_id),
+                    assigned_by=getattr(current_user, "id", None),
+                )
+            else:
+                logger.info(
+                    f"Skipped Childcare Leave tier assignment for "
+                    f"{employee_id}: not eligible."
+                )
 
         # The employees.email column HR/Super Admin just edited above is
         # a completely separate value from the Supabase Auth login email
