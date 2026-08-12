@@ -21,10 +21,24 @@ from app.core.logger import logger
 
 
 def _diff(old_values: Optional[dict], new_values: Optional[dict]) -> Optional[dict]:
-    """Return only the fields that actually changed, for a compact audit trail."""
+    """Return only the fields that actually changed, for a compact audit trail.
 
-    if old_values is None or new_values is None:
-        return new_values
+    Always shaped as {field: {"old": ..., "new": ...}} — including on a
+    pure creation event (old_values=None, e.g. CHECK_IN), where every
+    field is "old: None". Previously this returned new_values as-is in
+    that case (a flat {field: value} map), which is a different shape
+    the frontend doesn't expect: SecurityAuditLogs.jsx renders every
+    entry as diff.old / diff.new, so a raw value there (None in
+    particular) crashed it with "Cannot read properties of null
+    (reading 'old')" — reproducible on any Attendance/Leave audit entry
+    logged without old_values.
+    """
+
+    if new_values is None:
+        return None
+
+    if old_values is None:
+        return {key: {"old": None, "new": val} for key, val in new_values.items()}
 
     changed = {}
 
@@ -142,7 +156,9 @@ def record_audit_log(
                 "module": module,
                 "record_id": payload["record_id"],
             }
-            response = supabase_admin.table("audit_logs").insert(minimal_payload).execute()
+            response = (
+                supabase_admin.table("audit_logs").insert(minimal_payload).execute()
+            )
             return response.data[0] if response.data else None
 
     except Exception as e:
