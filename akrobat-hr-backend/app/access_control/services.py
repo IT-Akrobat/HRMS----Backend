@@ -149,6 +149,66 @@ def reset_lockout(employee_id: str):
 
 
 # =========================================================================
+# LOCKOUT VISIBILITY -- lets Super Admin see who's currently locked out
+# and clear it by hand, instead of the account only recovering once
+# locked_until passes on its own. Backs GET/POST
+# /access-control/lockouts[/{employee_id}/unlock].
+# =========================================================================
+
+
+def list_locked_accounts() -> list[dict]:
+    """Every employee currently locked out (locked_until in the future),
+    most-recently-locked first, joined with the basics needed to show
+    them in the UI."""
+
+    response = (
+        supabase_admin.table("login_lockouts")
+        .select("""
+            employee_id,
+            failed_attempts,
+            locked_until,
+            updated_at,
+            employees(
+                full_name,
+                employee_id,
+                email,
+                profile_photo
+            )
+            """)
+        .not_.is_("locked_until", "null")
+        .order("locked_until", desc=True)
+        .execute()
+    )
+
+    now = datetime.now(timezone.utc)
+    return [
+        row
+        for row in (response.data or [])
+        if row.get("locked_until") and _parse_ts(row["locked_until"]) > now
+    ]
+
+
+def unlock_account(employee_id: str) -> dict:
+    """Clears a lockout early. Returns the employee's basic info (for the
+    audit log description) or raises 404 if they were never locked."""
+
+    existing = (
+        supabase_admin.table("login_lockouts")
+        .select("employee_id, employees(full_name, employee_id)")
+        .eq("employee_id", employee_id)
+        .maybe_single()
+        .execute()
+    )
+
+    if not existing or not existing.data:
+        raise HTTPException(status_code=404, detail="This account isn't locked.")
+
+    reset_lockout(employee_id)
+
+    return existing.data.get("employees") or {}
+
+
+# =========================================================================
 # IP RESTRICTION -- consumed by app/auth/services.py::login_user
 # =========================================================================
 

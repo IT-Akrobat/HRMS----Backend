@@ -4,6 +4,8 @@ from app.access_control.schemas import UpdateAccessControlSettings
 from app.access_control.services import (
     force_logout_all_admins,
     get_access_control_settings,
+    list_locked_accounts,
+    unlock_account,
     update_access_control_settings,
 )
 from app.core.audit import record_audit_log
@@ -65,3 +67,32 @@ def force_logout_all(user=Depends(require_role(["SUPER ADMIN"]))):
     )
 
     return success_response(message="Admins signed out", data=result)
+
+
+# =========================
+# LOCKED ACCOUNTS
+# =========================
+
+
+@router.get("/lockouts")
+def get_locked_accounts(user=Depends(require_role(["SUPER ADMIN"]))):
+    return success_response(
+        message="Locked accounts fetched successfully",
+        data=list_locked_accounts(),
+    )
+
+
+@router.post("/lockouts/{employee_id}/unlock")
+def unlock_locked_account(
+    employee_id: str, user=Depends(require_role(["SUPER ADMIN"]))
+):
+    employee = unlock_account(employee_id)
+
+    record_audit_log(
+        module="SETTINGS",
+        action="UNLOCK_ACCOUNT",
+        performed_by=user.id,
+        description=f"Unlocked account for {employee.get('full_name') or employee_id}",
+    )
+
+    return success_response(message="Account unlocked", data=employee)
