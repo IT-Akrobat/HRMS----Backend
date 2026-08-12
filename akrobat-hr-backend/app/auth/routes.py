@@ -32,18 +32,24 @@ def login(data: LoginRequest, request: Request, response: Response):
         )
 
         # Tokens now go out as httpOnly cookies, never in the JSON body --
-        # see app/core/cookies.py for why. The CSRF cookie is deliberately
-        # readable by JS; the frontend mirrors it into an X-CSRF-Token
-        # header on every mutating request (see app/core/csrf.py).
+        # see app/core/cookies.py for why. The CSRF cookie is set here too,
+        # but frontend+backend are deployed on separate domains (Vercel/
+        # localhost + onrender.com) -- document.cookie on the frontend's
+        # origin can never read a cookie set for the backend's domain, no
+        # matter what SameSite/Secure say, since that's a per-domain
+        # browser restriction. So the token is *also* returned in the body
+        # here; the frontend caches it in memory and echoes it back as
+        # X-CSRF-Token on every mutating request (see apiClient.js).
         set_auth_cookies(
             response,
             session_response.session.access_token,
             session_response.session.refresh_token,
         )
-        issue_csrf_cookie(response)
+        csrf_token = issue_csrf_cookie(response)
 
         return {
             "user_id": session_response.user.id,
+            "csrf_token": csrf_token,
             "mfa_required": mfa_required,
             "password_expired": password_expired,
         }
@@ -85,9 +91,30 @@ def refresh(data: RefreshRequest, request: Request, response: Response):
         session_response.session.access_token,
         session_response.session.refresh_token,
     )
-    issue_csrf_cookie(response)
+    csrf_token = issue_csrf_cookie(response)
 
-    return {"user_id": session_response.user.id}
+    return {"user_id": session_response.user.id, "csrf_token": csrf_token}
+
+
+@router.get("/csrf")
+def get_csrf_token(response: Response):
+    """
+    Re-issues the CSRF cookie and hands the token back in the body so the
+    frontend can put it in memory (see apiClient.js).
+
+    Why this route exists: /auth/login and /auth/refresh already return
+    csrf_token, which covers a fresh session. But the frontend keeps that
+    token in a plain JS variable, not localStorage (see cookies.py's
+    reasoning on not keeping secrets in JS-readable storage) -- so a page
+    reload wipes it, and document.cookie can't recover it either (see the
+    comment in login() above). AuthContext calls this once on app load,
+    alongside GET /auth/me, to have a valid token ready before the user's
+    first click of the session. Safe/idempotent: GET isn't gated by
+    CSRFMiddleware, and no auth is required to call it -- it just hands
+    out a fresh double-submit token, same as login/refresh already do.
+    """
+    csrf_token = issue_csrf_cookie(response)
+    return {"csrf_token": csrf_token}
 
 
 @router.post("/logout")
