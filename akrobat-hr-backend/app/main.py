@@ -1,7 +1,7 @@
 import asyncio
 import sys
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -63,8 +63,15 @@ from app.expenses.routes import router as expense_router
 
 from app.audit_logs.routes import router as audit_log_router
 
-from app.core.config import APP_NAME, APP_VERSION, ENVIRONMENT, ALLOWED_ORIGINS
+from app.core.config import (
+    ACCESS_TOKEN_COOKIE,
+    ALLOWED_ORIGINS,
+    APP_NAME,
+    APP_VERSION,
+    ENVIRONMENT,
+)
 from app.core import realtime
+from app.core.csrf import CSRFMiddleware
 from app.core.database import supabase
 from app.core.rbac import has_permission
 from app.core.helpers.employee_helper import get_employee_id_for_auth_user
@@ -82,6 +89,15 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # same code deploys to any environment without edits. Falls back to the local
 # Vite dev origins when unset so local development keeps working out of the
 # box.
+# Starlette makes the LAST middleware added the OUTERMOST layer. CSRF
+# must be added before CORS (not after) so CORS ends up outermost --
+# otherwise a request CSRFMiddleware rejects with 403 never reaches
+# CORSMiddleware, the response goes out with no
+# Access-Control-Allow-Origin header, and the browser hides the real 403
+# behind a generic "Failed to fetch" / network-error message instead of
+# the CSRF message the frontend actually needs to see.
+app.add_middleware(CSRFMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -119,7 +135,7 @@ async def _capture_event_loop():
 
 
 @app.websocket("/ws/dashboard")
-async def dashboard_ws(websocket: WebSocket, token: str = Query(...)):
+async def dashboard_ws(websocket: WebSocket):
     # Live push for the super-admin dashboard: instead of polling
     # GET /dashboard and GET /audit-logs on a timer, the frontend opens
     # this socket and gets a message the instant any employee checks
@@ -128,11 +144,16 @@ async def dashboard_ws(websocket: WebSocket, token: str = Query(...)):
     # endpoints itself.
     #
     # Browsers can't attach an Authorization header to a WebSocket
-    # handshake, so the Supabase access token travels as a query param
-    # instead — same token apiClient.js already holds in sessionStorage,
-    # just appended to the ws:// URL rather than sent as a header.
+    # handshake, but they DO send cookies on it (same as any other
+    # request to this origin), so the access token now comes from the
+    # httpOnly cookie set at login (see app/core/cookies.py) instead of
+    # a ?token= query param -- the token never has to pass through JS,
+    # a URL, or a log line to get here. Requires COOKIE_SAMESITE=none +
+    # COOKIE_SECURE=true in production since the frontend and this API
+    # are on different domains (see app/core/config.py).
+    token = websocket.cookies.get(ACCESS_TOKEN_COOKIE)
     try:
-        user_response = supabase.auth.get_user(token)
+        user_response = supabase.auth.get_user(token) if token else None
         user = user_response.user if user_response else None
     except Exception:
         user = None
@@ -165,22 +186,22 @@ async def dashboard_ws(websocket: WebSocket, token: str = Query(...)):
 
 
 @app.websocket("/ws/notifications")
-async def notifications_ws(websocket: WebSocket, token: str = Query(...)):
+async def notifications_ws(websocket: WebSocket):
     # Real-time replacement for the frontend's old "poll GET
     # /notifications/my every few seconds" approach (see
     # src/components/layout/Header.jsx / useNotificationLiveUpdates).
     # notify_employee() in app/notifications/services.py pushes a message
     # here the instant a notification row is written, so it shows up as a
-    # toast with no polling delay. Same query-param token pattern as
-    # /ws/dashboard above (WebSocket handshakes can't carry an
-    # Authorization header).
+    # toast with no polling delay. Same cookie-based auth as /ws/dashboard
+    # above -- see the comment there for why this moved off ?token=.
     #
     # Unlike /ws/dashboard (one shared feed for anyone with
     # VIEW_ALL_ATTENDANCE), this is private per employee -- each socket is
     # registered under the connecting employee's own id, and only ever
     # receives notifications written for that id.
+    token = websocket.cookies.get(ACCESS_TOKEN_COOKIE)
     try:
-        user_response = supabase.auth.get_user(token)
+        user_response = supabase.auth.get_user(token) if token else None
         user = user_response.user if user_response else None
     except Exception:
         user = None

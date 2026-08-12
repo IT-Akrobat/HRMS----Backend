@@ -53,6 +53,42 @@ ALLOWED_ORIGINS = [
 ]
 
 # ---------------------------------------------------------------------
+# Auth cookies (see app/core/cookies.py, app/core/csrf.py)
+# ---------------------------------------------------------------------
+# access_token / refresh_token are now set as httpOnly cookies instead of
+# being returned in the JSON body and kept in localStorage — JS on the
+# page (including any XSS payload) can no longer read them.
+#
+# COOKIE_SECURE: browsers refuse to set/send `Secure` cookies over plain
+# http, which is what local dev (http://localhost:5173) uses -- so this
+# defaults to True only when ENVIRONMENT=production, off otherwise.
+COOKIE_SECURE = os.getenv(
+    "COOKIE_SECURE", "true" if ENVIRONMENT == "production" else "false"
+).lower() in ("1", "true", "yes")
+
+# SameSite=None is required for a cookie to be sent on a cross-SITE
+# request -- which is exactly the deployment shape here (frontend on one
+# domain, e.g. Vercel/Netlify, API on onrender.com). SameSite=None also
+# REQUIRES Secure=True (the browser drops the cookie otherwise), so this
+# only makes sense combined with COOKIE_SECURE=True in production.
+# Locally (same-site localhost <-> localhost) "lax" works over plain http.
+COOKIE_SAMESITE = os.getenv(
+    "COOKIE_SAMESITE", "none" if ENVIRONMENT == "production" else "lax"
+)
+
+# Optional -- only needed if frontend and backend are on sibling
+# subdomains of the same registrable domain (e.g. app.example.com /
+# api.example.com) and you want the cookie shared. Leave unset for the
+# separate-domain deployment (Render + Vercel/Netlify) this app currently
+# uses.
+COOKIE_DOMAIN = os.getenv("COOKIE_DOMAIN") or None
+
+ACCESS_TOKEN_COOKIE = "akrobat_access_token"
+REFRESH_TOKEN_COOKIE = "akrobat_refresh_token"
+CSRF_COOKIE = "akrobat_csrf_token"
+CSRF_HEADER = "X-CSRF-Token"
+
+# ---------------------------------------------------------------------
 # Quote of the Day (see app/dashboard/services.get_quote_of_day)
 # ---------------------------------------------------------------------
 # Both optional and intentionally read with os.getenv (not get_env()):

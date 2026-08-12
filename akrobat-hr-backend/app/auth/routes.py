@@ -1,47 +1,4 @@
-# from fastapi import APIRouter, Depends, HTTPException, Request
-
-# from app.auth.schemas import LoginRequest, MeEnvelope
-# from app.auth.services import get_me, login_user
-# from app.core.responses import success_response
-# from app.core.security import get_current_user
-
-# router = APIRouter(prefix="/auth", tags=["Authentication"])
-
-
-# @router.post("/login")
-# def login(data: LoginRequest, request: Request):
-
-#     try:
-
-#         response = login_user(data.email, data.password, request=request)
-
-#         return {
-#             "access_token": response.session.access_token,
-#             "refresh_token": response.session.refresh_token,
-#             "user_id": response.user.id,
-#         }
-
-#     except HTTPException:
-#         raise
-
-#     except Exception as e:
-
-#         raise HTTPException(status_code=401, detail=str(e))
-
-
-# @router.get("/me", response_model=MeEnvelope)
-# def me(user=Depends(get_current_user)):
-#     """
-#     The frontend's single post-login call. Returns everything needed to
-#     decide the redirect target and render the sidebar — role, permissions,
-#     allowed modules, sidebar entries, and profile — so no role logic needs
-#     to live in the frontend. See app/auth/services.get_me.
-#     """
-
-#     data = get_me(user)
-
-#     return success_response(message="User profile fetched successfully.", data=data)
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from app.auth.schemas import (
     ChangePasswordRequest,
@@ -50,9 +7,12 @@ from app.auth.schemas import (
     RefreshRequest,
 )
 from app.auth.services import change_password, get_me, login_user, refresh_user_session
+from app.core.config import ACCESS_TOKEN_COOKIE, REFRESH_TOKEN_COOKIE
+from app.core.cookies import clear_auth_cookies, issue_csrf_cookie, set_auth_cookies
 from app.core.responses import success_response
 from app.core.security import get_current_user
 from app.core.limiter import limiter
+from app.core.database import supabase_admin
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -63,18 +23,27 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 # the caller's IP.
 @router.post("/login")
 @limiter.limit("5/minute")
-def login(data: LoginRequest, request: Request):
+def login(data: LoginRequest, request: Request, response: Response):
 
     try:
 
-        response, mfa_required, password_expired = login_user(
+        session_response, mfa_required, password_expired = login_user(
             data.employee_code, data.password, request=request
         )
 
+        # Tokens now go out as httpOnly cookies, never in the JSON body --
+        # see app/core/cookies.py for why. The CSRF cookie is deliberately
+        # readable by JS; the frontend mirrors it into an X-CSRF-Token
+        # header on every mutating request (see app/core/csrf.py).
+        set_auth_cookies(
+            response,
+            session_response.session.access_token,
+            session_response.session.refresh_token,
+        )
+        issue_csrf_cookie(response)
+
         return {
-            "access_token": response.session.access_token,
-            "refresh_token": response.session.refresh_token,
-            "user_id": response.user.id,
+            "user_id": session_response.user.id,
             "mfa_required": mfa_required,
             "password_expired": password_expired,
         }
@@ -88,21 +57,61 @@ def login(data: LoginRequest, request: Request):
 
 
 @router.post("/refresh")
-def refresh(data: RefreshRequest):
+def refresh(data: RefreshRequest, request: Request, response: Response):
     """
-    Exchanges a refresh_token (issued at login, stored client-side) for a
-    new access_token — called by the frontend's apiClient whenever a
-    request comes back 401 "Invalid or expired token.", instead of forcing
-    a full re-login every time the ~1hr access token expires.
+    Exchanges a refresh_token for a new access_token — called by the
+    frontend's apiClient whenever a request comes back 401 "Invalid or
+    expired token.", instead of forcing a full re-login every time the
+    ~1hr access token expires.
+
+    Reads the refresh token from the httpOnly cookie by default (the
+    normal browser flow); falls back to the request body only for a
+    non-cookie client that explicitly passed one. See
+    app/auth/schemas.py::RefreshRequest.
     """
 
-    response = refresh_user_session(data.refresh_token)
+    refresh_token = request.cookies.get(REFRESH_TOKEN_COOKIE) or data.refresh_token
 
-    return {
-        "access_token": response.session.access_token,
-        "refresh_token": response.session.refresh_token,
-        "user_id": response.user.id,
-    }
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="No refresh token provided.")
+
+    session_response = refresh_user_session(refresh_token)
+
+    # Supabase rotates the refresh token on every use -- always re-set
+    # both cookies with the fresh pair, and reissue the CSRF cookie so
+    # its lifetime keeps pace with the session instead of expiring first.
+    set_auth_cookies(
+        response,
+        session_response.session.access_token,
+        session_response.session.refresh_token,
+    )
+    issue_csrf_cookie(response)
+
+    return {"user_id": session_response.user.id}
+
+
+@router.post("/logout")
+def logout(request: Request, response: Response):
+    """
+    Clears the auth cookies server-side (a client can't delete an
+    httpOnly cookie itself) and best-effort revokes the token with
+    Supabase so it can't be replayed elsewhere if it ever leaked before
+    logout.
+    """
+
+    token = request.cookies.get(ACCESS_TOKEN_COOKIE)
+    if token:
+        try:
+            # The plain `supabase` client here is stateless (see
+            # app/core/database.py -- persist_session=False), so it has no
+            # session attached to sign out of. The admin API's sign_out
+            # takes the JWT to revoke directly instead.
+            supabase_admin.auth.admin.sign_out(token, "global")
+        except Exception as e:
+            print("LOGOUT SIGN_OUT WARNING:", e)
+
+    clear_auth_cookies(response)
+    return success_response(message="Logged out.")
 
 
 @router.post("/change-password")

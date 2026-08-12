@@ -1,17 +1,22 @@
-from fastapi import Depends
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import Request
 
 from app.access_control.services import is_session_invalidated
+from app.core.config import ACCESS_TOKEN_COOKIE
 from app.core.database import supabase
 from app.core.exceptions import unauthorized
 
-security = HTTPBearer()
 
+def get_current_user(request: Request):
+    # Access token now travels as an httpOnly cookie (see
+    # app/core/cookies.py) instead of an `Authorization: Bearer ...`
+    # header -- the frontend no longer holds the token in JS at all, so
+    # it has nothing to put in a header. FastAPI's HTTPBearer is gone
+    # for the same reason; this reads the cookie directly off the
+    # request instead.
+    token = request.cookies.get(ACCESS_TOKEN_COOKIE)
 
-def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-):
-    token = credentials.credentials
+    if not token:
+        unauthorized("Invalid or expired token.")
 
     try:
 
@@ -35,3 +40,9 @@ def get_current_user(
     except Exception as e:
         print("SUPABASE AUTH ERROR:", e)
         unauthorized("Invalid or expired token.")
+
+
+def get_token_from_cookie(request: Request) -> str | None:
+    """Small helper for the few call sites (e.g. the WS handshakes in
+    app/main.py) that need the raw token rather than the resolved user."""
+    return request.cookies.get(ACCESS_TOKEN_COOKIE)

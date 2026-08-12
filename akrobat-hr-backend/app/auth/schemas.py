@@ -78,7 +78,15 @@ class LoginRequest(BaseModel):
 
 class RefreshRequest(BaseModel):
 
-    refresh_token: str
+    # The refresh token now normally travels as an httpOnly cookie (see
+    # app/core/cookies.py) rather than in the request body -- the
+    # frontend doesn't hold it in JS anymore, so it has nothing to put
+    # here. This field is optional and kept only so the endpoint doesn't
+    # break for any non-browser client that still wants to pass a
+    # refresh token explicitly (e.g. a script/mobile client not using
+    # cookies); POST /auth/refresh prefers the cookie when both are
+    # present. See app/auth/routes.py::refresh.
+    refresh_token: Optional[str] = None
 
 
 class ChangePasswordRequest(BaseModel):
