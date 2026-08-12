@@ -422,6 +422,61 @@ def consume_replacement_credits(
 # ==========================================
 
 
+def _get_or_create_leave_balance(employee: dict, leave_type: dict, year: int):
+    """
+    Fetches this employee's leave_balances row for (leave_type, year),
+    lazily creating it on first use if it doesn't exist yet.
+
+    Why this exists: get_my_leave_entitlements() (the "Apply Leave"
+    entitlements panel) already shows a 'fixed' leave type's
+    default_days to the employee even before a balance row exists in
+    the DB -- every eligible employee gets the exact same number for a
+    'fixed' type, so there's nothing per-person to guess. But this
+    validation used to require an actual leave_balances row and reject
+    with "No X balance found for <year>. Contact HR." the instant
+    someone tried to apply -- so an employee could SEE "2 days of
+    Casual Leave" on screen and still get blocked applying for it,
+    just because nobody had run generate_yearly_leave_balances() for
+    the year yet.
+
+    This makes apply-time match what's already displayed: create the
+    row on demand (same eligibility + day-resolution logic as the
+    yearly generator) instead of erroring, so a missed/late yearly run
+    no longer blocks anyone. Safe to call every time -- find_one runs
+    first and short-circuits once the row exists.
+
+    'tiered' types with no tier assigned still return None (there's no
+    correct number to grant without a tier), and the caller keeps its
+    own "Contact HR" error for that specific case.
+    """
+
+    balance = balance_repo.find_one(
+        {
+            "employee_id": employee["id"],
+            "leave_type_id": leave_type["id"],
+            "year": year,
+        },
+        select="id, total_days, used_days, remaining_days",
+    )
+    if balance:
+        return balance
+
+    days = _resolve_days_for_employee(employee, leave_type)
+    if days is None:
+        return None
+
+    return balance_repo.create(
+        {
+            "employee_id": employee["id"],
+            "leave_type_id": leave_type["id"],
+            "year": year,
+            "total_days": days,
+            "used_days": 0,
+            "remaining_days": days,
+        }
+    )
+
+
 def validate_leave_request_against_entitlement(
     employee: dict, leave_type: dict, total_days: int
 ):
@@ -462,18 +517,16 @@ def validate_leave_request_against_entitlement(
 
     # fixed / tiered
     current_year = datetime.now(timezone.utc).year
-    balance = balance_repo.find_one(
-        {
-            "employee_id": employee["id"],
-            "leave_type_id": leave_type["id"],
-            "year": current_year,
-        },
-        select="id, remaining_days",
-    )
+    balance = _get_or_create_leave_balance(employee, leave_type, current_year)
 
     if not balance:
+        # Only reachable for 'tiered' types with no tier assigned yet --
+        # there's genuinely no correct day count to grant (could be 21,
+        # 14, 11, 10... for Annual Leave), so this can't self-heal like
+        # 'fixed' types do. HR needs to assign a tier first.
         bad_request(
-            f"No {leave_name.title()} balance found for {current_year}. " "Contact HR."
+            f"No {leave_name.title()} entitlement configured for {current_year}. "
+            "Contact HR."
         )
 
     if (balance.get("remaining_days") or 0) < total_days:
