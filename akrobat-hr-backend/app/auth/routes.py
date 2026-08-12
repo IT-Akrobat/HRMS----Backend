@@ -52,11 +52,17 @@ from app.auth.schemas import (
 from app.auth.services import change_password, get_me, login_user, refresh_user_session
 from app.core.responses import success_response
 from app.core.security import get_current_user
+from app.core.limiter import limiter
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
+# Rate-limited to 5 attempts/minute per IP so a script can't brute-force
+# employee passwords. slowapi's Limiter needs the raw Request object as
+# an argument on the route function itself (not just Depends) to read
+# the caller's IP.
 @router.post("/login")
+@limiter.limit("5/minute")
 def login(data: LoginRequest, request: Request):
 
     try:

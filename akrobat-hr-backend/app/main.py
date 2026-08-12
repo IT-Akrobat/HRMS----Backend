@@ -3,6 +3,10 @@ import sys
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+
+from app.core.limiter import limiter
 
 # Windows-only fix: uvicorn's default ProactorEventLoop on Windows has a
 # known race with httpx's connection-pooled sync client (what supabase-py
@@ -66,6 +70,13 @@ from app.core.rbac import has_permission
 from app.core.helpers.employee_helper import get_employee_id_for_auth_user
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
+
+# Rate limiting (slowapi) — currently only applied to POST /auth/login
+# via @limiter.limit("5/minute") on that route, to stop scripted
+# password-guessing. app.state.limiter + this exception handler are
+# required by slowapi regardless of how many routes use @limiter.limit.
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS origins come from the ALLOWED_ORIGINS env var (comma-separated), so the
 # same code deploys to any environment without edits. Falls back to the local
