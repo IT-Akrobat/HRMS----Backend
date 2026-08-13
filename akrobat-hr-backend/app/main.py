@@ -1,5 +1,6 @@
 import asyncio
 import sys
+from types import SimpleNamespace
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +8,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from app.core.limiter import limiter
+from app.core.ws_tickets import redeem_ticket
 
 # Windows-only fix: uvicorn's default ProactorEventLoop on Windows has a
 # known race with httpx's connection-pooled sync client (what supabase-py
@@ -143,18 +145,27 @@ async def dashboard_ws(websocket: WebSocket):
     # in app/attendance/services.py), then refetches just those two
     # endpoints itself.
     #
-    # Browsers can't attach an Authorization header to a WebSocket
-    # handshake, but they DO send cookies on it (same as any other
-    # request to this origin), so the access token now comes from the
-    # httpOnly cookie set at login (see app/core/cookies.py) instead of
-    # a ?token= query param -- the token never has to pass through JS,
-    # a URL, or a log line to get here. Requires COOKIE_SAMESITE=none +
-    # COOKIE_SECURE=true in production since the frontend and this API
-    # are on different domains (see app/core/config.py).
+    # Prefer the httpOnly access-token cookie (same-origin deployments
+    # send it automatically on the WS handshake, same as any other
+    # request). Falls back to a short-lived ?ticket= (see
+    # app/core/ws_tickets.py) for deployments where the frontend is
+    # proxied through a different site -- a WS upgrade can't be proxied
+    # the way a normal fetch() can, so it connects straight to this
+    # API's domain, where the cookie may never have been stored (e.g.
+    # iOS/Safari blocking third-party cookies). The ticket is minted by
+    # GET /auth/ws-ticket over the proxied (cookie-authed) connection,
+    # so the real token still never has to sit in a URL or log line.
     token = websocket.cookies.get(ACCESS_TOKEN_COOKIE)
+    user = None
     try:
-        user_response = supabase.auth.get_user(token) if token else None
-        user = user_response.user if user_response else None
+        if token:
+            user_response = supabase.auth.get_user(token)
+            user = user_response.user if user_response else None
+        else:
+            ticket = websocket.query_params.get("ticket")
+            user_id = redeem_ticket(ticket) if ticket else None
+            if user_id:
+                user = SimpleNamespace(id=user_id)
     except Exception:
         user = None
 
@@ -192,17 +203,25 @@ async def notifications_ws(websocket: WebSocket):
     # src/components/layout/Header.jsx / useNotificationLiveUpdates).
     # notify_employee() in app/notifications/services.py pushes a message
     # here the instant a notification row is written, so it shows up as a
-    # toast with no polling delay. Same cookie-based auth as /ws/dashboard
-    # above -- see the comment there for why this moved off ?token=.
+    # toast with no polling delay. Same cookie-with-ticket-fallback auth
+    # as /ws/dashboard above -- see the comment there for why the
+    # ?ticket= fallback exists.
     #
     # Unlike /ws/dashboard (one shared feed for anyone with
     # VIEW_ALL_ATTENDANCE), this is private per employee -- each socket is
     # registered under the connecting employee's own id, and only ever
     # receives notifications written for that id.
     token = websocket.cookies.get(ACCESS_TOKEN_COOKIE)
+    user = None
     try:
-        user_response = supabase.auth.get_user(token) if token else None
-        user = user_response.user if user_response else None
+        if token:
+            user_response = supabase.auth.get_user(token)
+            user = user_response.user if user_response else None
+        else:
+            ticket = websocket.query_params.get("ticket")
+            user_id = redeem_ticket(ticket) if ticket else None
+            if user_id:
+                user = SimpleNamespace(id=user_id)
     except Exception:
         user = None
 

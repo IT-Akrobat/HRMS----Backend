@@ -321,18 +321,15 @@ from app.core.exceptions import bad_request, forbidden, unauthorized
 from app.core.database import supabase
 from app.core.helpers.employee_helper import get_employee_by_code
 from app.core.rbac import get_permissions_for_role
+from app.core.request_ip import get_client_ip
 from app.core.sidebar import build_sidebar
 
 
 def _client_ip(request: Request | None) -> str | None:
-    if not request:
-        return None
-    # Behind a proxy/load balancer the real client IP is the first hop
-    # in X-Forwarded-For; fall back to the direct connection otherwise.
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else None
+    # Kept as a thin wrapper (rather than a straight import everywhere)
+    # so existing call sites in this file don't all need touching --
+    # see app/core/request_ip.py for the actual logic and why it exists.
+    return get_client_ip(request)
 
 
 def login_user(employee_code: str, password: str, request: Request = None):

@@ -1497,6 +1497,7 @@ from app.core.logger import logger
 from app.core.exceptions import bad_request, forbidden, internal_server_error
 from app.core.audit import record_audit_log
 from app.core.rbac import has_permission
+from app.core.request_ip import get_client_ip
 from app.core.helpers.employee_helper import (
     get_employee_id_for_auth_user,
     is_manager_of,
@@ -1933,7 +1934,10 @@ def check_in(auth_user_id: str, data, request: Optional[Request] = None):
         }
 
         if request is not None:
-            payload["ip_address"] = request.client.host if request.client else None
+            # See app/core/request_ip.py -- reads X-Forwarded-For first so
+            # this logs the employee's real IP instead of the Vercel
+            # proxy's, when the frontend is proxied (vercel.json).
+            payload["ip_address"] = get_client_ip(request)
             payload["device_info"] = request.headers.get("user-agent")
 
         attendance_data = attendance_repo.create(payload)

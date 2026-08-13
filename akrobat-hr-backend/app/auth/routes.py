@@ -13,6 +13,7 @@ from app.core.responses import success_response
 from app.core.security import get_current_user
 from app.core.limiter import limiter
 from app.core.database import supabase_admin
+from app.core.ws_tickets import issue_ticket
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -161,6 +162,28 @@ def change_password_route(
     )
 
     return success_response(message=result["message"])
+
+
+@router.get("/ws-ticket")
+def get_ws_ticket(user=Depends(get_current_user)):
+    """
+    Mints a short-lived, single-use ticket for opening a WebSocket
+    connection (see app/core/ws_tickets.py and the /ws/dashboard,
+    /ws/notifications handlers in app/main.py).
+
+    Why this exists: the WS handshake can't rely on the access-token
+    cookie alone when the frontend is proxied through a different site
+    (e.g. a free Vercel rewrite proxy) -- normal fetch()/XHR calls go
+    through that proxy and pick up the cookie fine, but a WebSocket
+    upgrade can't be proxied the same way and connects straight to this
+    API's own domain, where the browser may never have been allowed to
+    store the cookie (iOS/Safari blocks third-party cookies). This route
+    is called over the *proxied* connection -- so it's cookie-authed as
+    normal -- and hands back a ticket the client appends as
+    ?ticket=... on the direct WS URL instead.
+    """
+    ticket = issue_ticket(user.id)
+    return {"ticket": ticket}
 
 
 @router.get("/me", response_model=MeEnvelope)

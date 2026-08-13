@@ -18,6 +18,7 @@ from fastapi import Request
 
 from app.core.database import supabase_admin
 from app.core.logger import logger
+from app.core.request_ip import get_client_ip
 
 
 def _diff(old_values: Optional[dict], new_values: Optional[dict]) -> Optional[dict]:
@@ -139,7 +140,10 @@ def record_audit_log(
             )
 
         if request is not None:
-            payload["ip_address"] = request.client.host if request.client else None
+            # See app/core/request_ip.py -- reads X-Forwarded-For first so
+            # this logs the real IP instead of the Vercel proxy's, when
+            # the frontend is proxied (see vercel.json).
+            payload["ip_address"] = get_client_ip(request)
             payload["user_agent"] = request.headers.get("user-agent")
 
         # Some deployments still have the narrower audit_logs schema
