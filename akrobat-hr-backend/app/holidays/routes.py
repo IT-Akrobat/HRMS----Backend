@@ -14,12 +14,16 @@ from app.holidays.services import (
     get_saturday_holidays,
 )
 from app.core.rbac import require_permission
+from app.core.security import get_current_user
 
 router = APIRouter(prefix="/holidays", tags=["Holidays"])
 
 
 @router.post("/")
-def create(data: CreateHolidayRequest):
+def create(
+    data: CreateHolidayRequest,
+    user=Depends(require_permission("EDIT_EMPLOYEE")),
+):
     return create_holiday(data)
 
 
@@ -51,20 +55,25 @@ def get_all(
         None,
         description="Filter by country calendar, e.g. 'SG' or 'IN'. Omit for all.",
     ),
+    user=Depends(get_current_user),
 ):
     return get_holidays(country=country)
 
 
 @router.get("/{holiday_id}")
-def get_one(holiday_id: str):
+def get_one(holiday_id: str, user=Depends(get_current_user)):
     return get_holiday(holiday_id)
 
 
 @router.put("/{holiday_id}")
-def update(holiday_id: str, data: dict):
+def update(
+    holiday_id: str,
+    data: dict,
+    user=Depends(require_permission("EDIT_EMPLOYEE")),
+):
     return update_holiday(holiday_id, data)
 
 
 @router.delete("/{holiday_id}")
-def delete(holiday_id: str):
+def delete(holiday_id: str, user=Depends(require_permission("EDIT_EMPLOYEE"))):
     return delete_holiday(holiday_id)
