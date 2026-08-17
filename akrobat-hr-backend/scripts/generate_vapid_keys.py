@@ -34,6 +34,8 @@ def main():
     public_key = base64.urlsafe_b64encode(raw_point).rstrip(b"=").decode("utf-8")
     private_key = vapid.private_pem().decode("utf-8")
 
+    private_key_b64 = base64.b64encode(private_key.encode("utf-8")).decode("utf-8")
+
     print("Add these to your .env:\n")
     print(f"VAPID_PUBLIC_KEY={public_key}")
     print("VAPID_PRIVATE_KEY=" + private_key.replace("\n", "\\n"))
@@ -42,6 +44,13 @@ def main():
         "the multi-line \\n form, paste it between triple-quotes instead, or "
         "store it as a secret file and point an env var at the path.)"
     )
+    print(
+        "\nHost env-var UIs (Render included) sometimes mangle multi-line "
+        "PEM values no matter how you paste them. If that happens, use this "
+        "single base64-encoded line for VAPID_PRIVATE_KEY instead -- "
+        "app/core/config.py auto-detects and decodes it:\n"
+    )
+    print(f"VAPID_PRIVATE_KEY={private_key_b64}")
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+import base64
 import os
 
 from dotenv import load_dotenv
@@ -148,17 +149,39 @@ def _normalize_vapid_private_key(raw: str | None) -> str | None:
     """
     Host env-var UIs (Render included) are inconsistent about how a
     multi-line PEM block survives copy/paste -- literal backslash-n
-    sequences instead of real newlines, a stray wrapping quote, or
-    leading/trailing whitespace all produce the same cryptography
-    error at push-send time ("ASN.1 parsing error: invalid length")
-    with no indication of which of those it actually was. Normalize
-    all three here instead of debugging it via production logs.
+    sequences instead of real newlines, a stray wrapping quote,
+    leading/trailing whitespace, or (seen in practice on Render) the
+    UI silently collapsing/mangling real newlines even when pasted
+    correctly -- all produce the same cryptography error at push-send
+    time ("ASN.1 parsing error: invalid length") with no indication of
+    which of those it actually was.
+
+    To sidestep the multi-line paste problem entirely, VAPID_PRIVATE_KEY
+    may instead be set to the *base64 encoding of the whole PEM block*
+    (a single line, alphanumeric + "+/=" only -- nothing an env-var UI
+    can mangle). Generate it with:
+        python -m scripts.generate_vapid_keys --base64
+    and paste that single line as the env var value instead of the raw
+    PEM. This is tried first; if the value doesn't decode to something
+    starting with "-----BEGIN", it's treated as a raw/escaped PEM and
+    falls through to the old normalization.
     """
     if not raw:
         return raw
     raw = raw.strip()
     if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
         raw = raw[1:-1]
+    raw = raw.strip()
+
+    # Try base64-decoded PEM first (see docstring above).
+    if "-----BEGIN" not in raw:
+        try:
+            decoded = base64.b64decode(raw, validate=True).decode("utf-8")
+            if "-----BEGIN" in decoded:
+                return decoded.strip()
+        except Exception:
+            pass  # Not base64 -- fall through to legacy handling below.
+
     return raw.replace("\\n", "\n")
 
 
