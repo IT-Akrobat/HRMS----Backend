@@ -1,9 +1,31 @@
 import json
 
+from py_vapid import Vapid01
 from pywebpush import WebPushException, webpush
 
 from app.core.config import VAPID_CLAIMS_EMAIL, VAPID_PRIVATE_KEY, VAPID_PUBLIC_KEY
 from app.core.logger import logger
+
+# ---------------------------------------------------------------------------
+# webpush() accepts vapid_private_key as EITHER a Vapid01 instance OR a
+# path to a PEM *file* -- if it's neither (e.g. our PEM string loaded from
+# the env var), it silently falls through to py_vapid's Vapid.from_string(),
+# which -- unlike from_file() -- does NOT check for a "-----BEGIN" header.
+# It just strips newlines and base64url-decodes the whole string, headers
+# included, producing garbage bytes and exactly the
+# "Could not deserialize key data ... ASN.1 parsing error: invalid length"
+# error this caused. Pre-parsing into a Vapid01 object here sidesteps that
+# path entirely. Parsed once at import time since the key never changes at
+# runtime; if VAPID_PRIVATE_KEY is missing/malformed, this stays None and
+# push_configured() (below) reports push as unavailable rather than
+# raising at import time.
+# ---------------------------------------------------------------------------
+_vapid: Vapid01 | None = None
+if VAPID_PRIVATE_KEY:
+    try:
+        _vapid = Vapid01.from_pem(VAPID_PRIVATE_KEY.encode("utf8"))
+    except Exception as e:
+        logger.error(f"Could not parse VAPID_PRIVATE_KEY at startup: {e}")
 
 # ---------------------------------------------------------------------------
 # Real browser/OS push notifications -- the piece that makes a notification
@@ -20,7 +42,7 @@ from app.core.logger import logger
 
 
 def push_configured() -> bool:
-    return bool(VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY)
+    return bool(VAPID_PUBLIC_KEY and _vapid)
 
 
 def send_push(subscription: dict, title: str, body: str, url: str = "/") -> bool:
@@ -46,7 +68,7 @@ def send_push(subscription: dict, title: str, body: str, url: str = "/") -> bool
         webpush(
             subscription_info=subscription,
             data=json.dumps({"title": title, "body": body, "url": url}),
-            vapid_private_key=VAPID_PRIVATE_KEY,
+            vapid_private_key=_vapid,
             vapid_claims={"sub": VAPID_CLAIMS_EMAIL},
             ttl=60 * 60 * 24,  # push service holds it up to 24h if offline
         )
