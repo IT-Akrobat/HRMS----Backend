@@ -1909,26 +1909,36 @@ def get_on_leave_today():
 
         records = response.data or []
 
-        results = []
+        # An employee can have more than one *approved* leave_requests row
+        # covering today (e.g. overlapping half-day entries, or a leave
+        # split across leave types). This widget shows "who's out today",
+        # so we dedupe to one card per employee rather than one per leave
+        # request row — otherwise the same employee_id repeats in the
+        # response, which the frontend list keys on (see
+        # OnLeaveTodayCard in CelebrationsStrip.jsx) and reacts to with
+        # a duplicate-key warning.
+        results_by_employee = {}
         for row in records:
             emp = row.get("employees") or {}
             leave_type = row.get("leave_types") or {}
-            results.append(
-                {
-                    "employee_id": emp.get("id"),
-                    "employee_code": emp.get("employee_id"),
-                    "full_name": emp.get("full_name"),
-                    "profile_photo": emp.get("profile_photo"),
-                    "department_name": (emp.get("departments") or {}).get(
-                        "department_name"
-                    ),
-                    "leave_type": leave_type.get("leave_name"),
-                    "start_date": row.get("start_date"),
-                    "end_date": row.get("end_date"),
-                    "total_days": row.get("total_days"),
-                }
-            )
+            employee_id = emp.get("id")
+            if employee_id is None or employee_id in results_by_employee:
+                continue
+            results_by_employee[employee_id] = {
+                "employee_id": employee_id,
+                "employee_code": emp.get("employee_id"),
+                "full_name": emp.get("full_name"),
+                "profile_photo": emp.get("profile_photo"),
+                "department_name": (emp.get("departments") or {}).get(
+                    "department_name"
+                ),
+                "leave_type": leave_type.get("leave_name"),
+                "start_date": row.get("start_date"),
+                "end_date": row.get("end_date"),
+                "total_days": row.get("total_days"),
+            }
 
+        results = list(results_by_employee.values())
         results.sort(key=lambda r: r["full_name"] or "")
 
         return {"date": today, "count": len(results), "employees": results}
