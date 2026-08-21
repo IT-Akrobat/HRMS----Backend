@@ -53,6 +53,17 @@ def login(data: LoginRequest, request: Request, response: Response):
             "csrf_token": csrf_token,
             "mfa_required": mfa_required,
             "password_expired": password_expired,
+            # Standalone-PWA fallback only (see apiClient.js's
+            # getStandaloneRefreshToken/setStandaloneRefreshToken):
+            # iOS's WKWebView, which backs "Add to Home Screen" apps,
+            # doesn't reliably persist httpOnly cookies to disk before
+            # the OS kills a backgrounded app process, so those clients
+            # keep this in localStorage and send it back explicitly on
+            # /auth/refresh instead of relying solely on the cookie.
+            # Regular browser clients receive this too but never store
+            # or use it -- the cookie remains the primary mechanism for
+            # everyone.
+            "refresh_token": session_response.session.refresh_token,
         }
 
     except HTTPException:
@@ -94,7 +105,16 @@ def refresh(data: RefreshRequest, request: Request, response: Response):
     )
     csrf_token = issue_csrf_cookie(response)
 
-    return {"user_id": session_response.user.id, "csrf_token": csrf_token}
+    return {
+        "user_id": session_response.user.id,
+        "csrf_token": csrf_token,
+        # See the matching comment in login() above -- standalone-PWA
+        # fallback only. Also rotated here since Supabase rotates the
+        # refresh token on every call; a client using the fallback MUST
+        # overwrite its stored value with this one or the next refresh
+        # will fail with a stale/reused token.
+        "refresh_token": session_response.session.refresh_token,
+    }
 
 
 @router.get("/csrf")
