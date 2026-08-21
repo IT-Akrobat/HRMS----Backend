@@ -74,7 +74,10 @@ from app.core.config import (
 )
 from app.core import realtime
 from app.core.csrf import CSRFMiddleware
-from app.core.database import supabase
+
+# remove: from app.core.database import supabase
+from app.core.rbac import has_permission
+from app.core.security import verify_access_token  # add this
 from app.core.rbac import has_permission
 from app.core.helpers.employee_helper import get_employee_id_for_auth_user
 
@@ -159,8 +162,7 @@ async def dashboard_ws(websocket: WebSocket):
     user = None
     try:
         if token:
-            user_response = supabase.auth.get_user(token)
-            user = user_response.user if user_response else None
+            user = verify_access_token(token)  # was: supabase.auth.get_user(token)
         else:
             ticket = websocket.query_params.get("ticket")
             user_id = redeem_ticket(ticket) if ticket else None
@@ -215,8 +217,7 @@ async def notifications_ws(websocket: WebSocket):
     user = None
     try:
         if token:
-            user_response = supabase.auth.get_user(token)
-            user = user_response.user if user_response else None
+            user = verify_access_token(token)  # was: supabase.auth.get_user(token)
         else:
             ticket = websocket.query_params.get("ticket")
             user_id = redeem_ticket(ticket) if ticket else None
