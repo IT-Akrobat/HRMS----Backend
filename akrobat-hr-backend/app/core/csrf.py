@@ -35,8 +35,21 @@ UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 # Endpoints reachable before a CSRF cookie exists yet (no session to
 # forge a request against) or that intentionally don't run through the
 # cookie/CSRF flow. Keep this list short and explicit.
+#
+# /auth/refresh is included for the same reason as /auth/login: forging
+# it cross-site gains an attacker nothing to act on. The new tokens go
+# out as httpOnly cookies the attacker's page can't read, and CORS
+# blocks it from reading the JSON response body cross-origin either --
+# so there's no CSRF-relevant state change to protect here. This also
+# closes a real failure mode: on iOS standalone PWAs, if the CSRF cookie
+# fails to persist across an app restart (same underlying WKWebView
+# issue as the auth cookies -- see apiClient.js's standalone refresh-
+# token fallback), a session that would otherwise recover via the
+# refresh-token fallback was instead getting hard-blocked here with
+# "CSRF token missing" before ever reaching the refresh_token check.
 EXEMPT_PATHS = {
     "/auth/login",
+    "/auth/refresh",
 }
 
 
