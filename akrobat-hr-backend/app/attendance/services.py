@@ -2781,6 +2781,194 @@ def ping_site_visit(auth_user_id: str, data, request: Optional[Request] = None):
         internal_server_error("Unable to record presence ping.")
 
 
+# ==========================================================================
+# SITE VISIT COMPLIANCE (self-service "did I miss an assigned site today?"
+# check — same "no background scheduler" constraint as
+# get_attendance_reminder_status() above, so this rides along on the
+# employee's own open session instead of a real cron job.)
+# ==========================================================================
+
+
+def get_site_visit_compliance_status(auth_user_id: str):
+    """
+    For the CURRENT employee: looks at every active site assignment that
+    covers today (assigned_from <= today <= assigned_to, treating either
+    bound as open-ended when null). Once that employee's shift has ended
+    for the day (same shift-resolution rules as the attendance reminder —
+    _get_employee_shift, IST-aware) and no attendance_site_visits row
+    exists for that site today, the assignment counts as "missed":
+
+      - the employee's manager (+ every SUPER ADMIN) gets a one-time
+        "Site visit missed" notification, deduped per manager/site/day the
+        same way get_attendance_reminder_status dedupes its own reminder
+        (a notifications-table lookup instead of a real job-run flag,
+        since there's nowhere else to persist that here).
+      - the site's id is returned in `missed_site_ids` so the frontend
+        (SiteVisitCard) can stop the employee from tapping "Arrived" for
+        it for the rest of today — once the manager's been told a visit
+        was missed, letting the employee quietly log one after the fact
+        would just make that notification wrong.
+
+    Polled by SiteVisitCard on load and every few minutes while it's
+    mounted (mirrors the reminder-check poll on Header.jsx) — best-effort
+    and silent on any failure, exactly like the reminder check, since a
+    broken compliance check should never block the card from rendering.
+    """
+    try:
+        employee_id = get_employee_id_for_auth_user(auth_user_id)
+        if not employee_id:
+            return success_response(
+                message="No compliance check due.", data={"missed_site_ids": []}
+            )
+
+        today = date.today()
+
+        assignments = (
+            supabase_admin.table("employee_site_assignments")
+            .select(
+                "id, location_id, assigned_from, assigned_to, locations(location_name)"
+            )
+            .eq("employee_id", employee_id)
+            .eq("is_active", True)
+            .execute()
+        )
+
+        today_iso = today.isoformat()
+        covering_today = [
+            a
+            for a in (assignments.data or [])
+            if (not a.get("assigned_from") or a["assigned_from"] <= today_iso)
+            and (not a.get("assigned_to") or a["assigned_to"] >= today_iso)
+        ]
+
+        if not covering_today:
+            return success_response(
+                message="No compliance check due.", data={"missed_site_ids": []}
+            )
+
+        # Only worth checking once the employee's shift for today is over
+        # — flagging a "missed" visit mid-shift would just be wrong (they
+        # still have time to go). Same resolution + grace period the
+        # attendance reminder above uses.
+        rule = _get_attendance_rule()
+        shift = _get_employee_shift(employee_id, today)
+        if not shift or not shift.get("end_time"):
+            return success_response(
+                message="No compliance check due.", data={"missed_site_ids": []}
+            )
+
+        hh, mm, *_ = str(shift["end_time"]).split(":")
+        company_tz = _get_company_timezone()
+        scheduled_end_local = datetime.combine(
+            today, time(int(hh), int(mm)), tzinfo=company_tz
+        )
+        # Overnight shifts (end_time earlier than start than start_time)
+        # roll to the next day, same convention used elsewhere for shift
+        # math — otherwise this would fire hours too early for them.
+        if shift.get("start_time") and str(shift["end_time"]) < str(
+            shift["start_time"]
+        ):
+            scheduled_end_local += timedelta(days=1)
+        scheduled_end = scheduled_end_local.astimezone(timezone.utc).replace(
+            tzinfo=None
+        )
+
+        grace = shift.get("grace_period")
+        if grace is None:
+            grace = rule.get("late_grace_minutes", 0)
+
+        if _now_utc() < scheduled_end + timedelta(minutes=grace):
+            return success_response(
+                message="No compliance check due.", data={"missed_site_ids": []}
+            )
+
+        employee = (
+            supabase_admin.table("employees")
+            .select("full_name, manager_id")
+            .eq("id", employee_id)
+            .maybe_single()
+            .execute()
+        )
+        employee_data = (employee.data if employee else None) or {}
+        employee_name = employee_data.get("full_name", "An employee")
+        manager_id = employee_data.get("manager_id")
+
+        day_start = datetime.combine(today, time(0, 0)).isoformat()
+        missed_site_ids = []
+
+        for assignment in covering_today:
+            location_id = assignment.get("location_id")
+            site_name = (assignment.get("locations") or {}).get(
+                "location_name", "the assigned site"
+            )
+
+            visited = (
+                supabase_admin.table("attendance_site_visits")
+                .select("id")
+                .eq("employee_id", employee_id)
+                .eq("location_id", location_id)
+                .gte("arrival_time", day_start)
+                .limit(1)
+                .execute()
+            )
+            if visited and visited.data:
+                continue
+
+            missed_site_ids.append(location_id)
+
+            already_notified = (
+                supabase_admin.table("notifications")
+                .select("id")
+                .eq("notification_type", "SITE_VISIT_MISSED")
+                .gte("created_at", day_start)
+                .ilike("message", f"%{employee_name}%{site_name}%")
+                .limit(1)
+                .execute()
+            )
+            if already_notified and already_notified.data:
+                continue
+
+            message = (
+                f"{employee_name} did not visit their assigned site "
+                f"{site_name} today."
+            )
+
+            recipient_ids = set(get_employee_ids_for_role(ADMIN))
+            if manager_id:
+                recipient_ids.add(manager_id)
+            recipient_ids.discard(employee_id)
+
+            for recipient_id in recipient_ids:
+                notify_employee(
+                    recipient_id,
+                    title="Site visit missed",
+                    message=message,
+                    notification_type="SITE_VISIT_MISSED",
+                )
+
+            record_audit_log(
+                module="ATTENDANCE",
+                action="SITE_VISIT_MISSED",
+                performed_by=auth_user_id,
+                target_employee_id=employee_id,
+                record_id=assignment.get("id"),
+                description=message,
+            )
+
+        return success_response(
+            message="Compliance check complete.",
+            data={"missed_site_ids": missed_site_ids},
+        )
+
+    except Exception as e:
+        # Best-effort background check — never let this bubble up as a
+        # 500 to a page that's just polling.
+        logger.error(f"Site visit compliance check failed for {auth_user_id}: {e}")
+        return success_response(
+            message="No compliance check due.", data={"missed_site_ids": []}
+        )
+
+
 def _effective_visit_minutes(visit: dict) -> int:
     """
     Minutes spent on this visit *as of right now*.

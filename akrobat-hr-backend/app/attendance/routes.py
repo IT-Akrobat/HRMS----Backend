@@ -41,6 +41,7 @@ from app.attendance.services import (
     get_org_site_visits_today,
     get_org_site_visits_history,
     get_employee_site_visits_history,
+    get_site_visit_compliance_status,
 )
 
 from app.core.security import get_current_user
@@ -120,6 +121,18 @@ def site_visit_ping(
 @router.get("/site-visit/today")
 def site_visit_today(user=Depends(get_current_user)):
     return get_my_site_visits_today(user.id)
+
+
+# Self-service "did I miss an assigned site today?" check -- polled by
+# SiteVisitCard the same way /reminder-check is polled by Header.jsx.
+# Once the employee's shift is over, flags any assigned site with no
+# visit logged today: notifies their manager (+ super admins) once, and
+# returns the missed site ids so the frontend can stop them tapping
+# "Arrived" for those for the rest of today. See
+# get_site_visit_compliance_status() docstring for full conditions.
+@router.get("/site-visit/compliance-today")
+def site_visit_compliance_today(user=Depends(get_current_user)):
+    return get_site_visit_compliance_status(user.id)
 
 
 @router.get("/team/site-visits")
