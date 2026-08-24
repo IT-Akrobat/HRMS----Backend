@@ -148,6 +148,17 @@ def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
          if no Saturday sibling is found. Schema note: shift assignment
          isn't day-of-week aware, so this is a naming-convention-based
          heuristic, not a first-class model — flagged in REFACTOR_NOTES.
+      4. Step 3 only applies if this employee actually works Saturdays,
+         per employees.works_saturday (set via the Create/Edit User
+         form's Saturday Yes/No toggle) — a column deliberately separate
+         from employees.working_days_per_week, which is a payroll-only
+         figure (Unpaid Leave deduction denominator) with no defined
+         relationship to Saturday shift hours in the source Leave Info
+         doc. works_saturday == False means this employee is off on
+         Saturdays regardless of their department's area schedule, so we
+         deliberately skip the SATURDAY sibling lookup below and return
+         None instead of silently applying the area's Saturday hours to
+         everyone.
     """
 
     shift = None
@@ -170,21 +181,39 @@ def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
     except Exception as e:
         logger.error(f"Failed to fetch employee_shift_history for {employee_id}: {e}")
 
+    works_saturday = False
     if not shift:
         try:
             employee = (
                 supabase_admin.table("employees")
-                .select("shift_id, shifts(*)")
+                .select("shift_id, works_saturday, shifts(*)")
                 .eq("id", employee_id)
                 .maybe_single()
                 .execute()
             )
             if employee and employee.data:
                 shift = employee.data.get("shifts")
+                works_saturday = bool(employee.data.get("works_saturday"))
         except Exception as e:
             logger.error(f"Failed to fetch default shift for {employee_id}: {e}")
+    else:
+        try:
+            employee = (
+                supabase_admin.table("employees")
+                .select("works_saturday")
+                .eq("id", employee_id)
+                .maybe_single()
+                .execute()
+            )
+            if employee and employee.data:
+                works_saturday = bool(employee.data.get("works_saturday"))
+        except Exception as e:
+            logger.error(f"Failed to fetch works_saturday for {employee_id}: {e}")
 
     if not shift:
+        return None
+
+    if for_date.weekday() == 5 and not works_saturday:
         return None
 
     if (

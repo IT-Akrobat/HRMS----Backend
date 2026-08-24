@@ -221,6 +221,7 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
                 "marital_status": data.marital_status,
                 "nationality": data.nationality,
                 "working_days_per_week": data.working_days_per_week,
+                "works_saturday": data.works_saturday,
             }
         )
 

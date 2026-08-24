@@ -72,6 +72,9 @@ class EmployeeCreate(BaseModel):
     # Drives the Unpaid Leave payroll deduction (Unpaid Leave itself
     # never gets a leave_balances row -- see
     # app/leaves/policy_services.py). 5 / 5.5 / 6 per the Leave Info doc.
+    # Deliberately independent of `works_saturday` below -- the payroll
+    # doc doesn't tie 5.5-vs-6 to whether this employee's *shift*
+    # actually includes Saturday hours, so HR sets this on its own.
     working_days_per_week: float = Field(default=5)
 
     @field_validator("working_days_per_week")
@@ -80,6 +83,12 @@ class EmployeeCreate(BaseModel):
         if v not in WORKING_DAYS_PER_WEEK_OPTIONS:
             raise ValueError("working_days_per_week must be 5, 5.5, or 6.")
         return v
+
+    # Whether this employee's shift includes Saturday hours -- purely an
+    # attendance concept (gates the Saturday-sibling-shift lookup in
+    # app/attendance/services.py _get_employee_shift), unrelated to the
+    # payroll working_days_per_week figure above.
+    works_saturday: bool = Field(default=False)
 
 
 # ==========================================
@@ -160,6 +169,8 @@ class EmployeeUpdate(BaseModel):
         if v is not None and v not in WORKING_DAYS_PER_WEEK_OPTIONS:
             raise ValueError("working_days_per_week must be 5, 5.5, or 6.")
         return v
+
+    works_saturday: Optional[bool] = None
 
 
 # ==========================================
