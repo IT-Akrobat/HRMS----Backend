@@ -42,15 +42,13 @@ from app.payroll.routes import router as payroll_router
 from app.documents.routes import router as document_router
 from fastapi.exceptions import RequestValidationError
 from fastapi import HTTPException
-from app.projects.routes import router as project_router
+
 from app.core.exception_handler import (
     http_exception_handler,
     validation_exception_handler,
     unhandled_exception_handler,
 )
-from app.employee_project_assignments.routes import (
-    router as employee_project_assignment_router,
-)
+
 from app.site_assignments.routes import router as site_assignment_router
 from app.notifications.routes import router as notification_router
 from app.push_subscriptions.routes import router as push_subscriptions_router
@@ -61,7 +59,7 @@ from app.announcements.routes import router as announcement_router
 from app.reports.routes import router as report_router
 from app.settings.routes import router as settings_router
 from app.access_control.routes import router as access_control_router
-from app.expenses.routes import router as expense_router
+
 
 from app.audit_logs.routes import router as audit_log_router
 
@@ -275,8 +273,7 @@ app.include_router(dashboard_router)
 app.include_router(payroll_router)
 
 app.include_router(document_router)
-app.include_router(project_router)
-app.include_router(employee_project_assignment_router)
+
 app.include_router(site_assignment_router)
 
 app.include_router(notification_router)
@@ -290,5 +287,5 @@ app.include_router(report_router)
 app.include_router(settings_router)
 app.include_router(access_control_router)
 
-app.include_router(expense_router)
+
 app.include_router(audit_log_router)
