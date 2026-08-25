@@ -76,11 +76,20 @@ def send_push(subscription: dict, title: str, body: str, url: str = "/") -> bool
 
     except WebPushException as e:
         status = getattr(e.response, "status_code", None)
-        if status in (404, 410):
-            # Subscription no longer valid (user revoked permission,
-            # uninstalled, or the browser rotated it) -- not an error
-            # worth logging loudly, just a stale row to clean up.
-            logger.info(f"Push subscription gone ({status}), pruning: {e}")
+        body = getattr(e.response, "text", "") or str(e)
+
+        # A subscription created under a since-rotated VAPID key pair can
+        # never succeed again -- the push service (FCM/Mozilla autopush)
+        # rejects it with 403 and this specific message forever, no
+        # matter how many times we retry. Treat it the same as a
+        # gone/expired subscription (404/410): prune it so the row stops
+        # failing silently on every future notification and the user can
+        # get a working subscription again next time they open the app.
+        vapid_mismatch = status == 403 and "do not correspond" in body.lower()
+
+        if status in (404, 410) or vapid_mismatch:
+            reason = "VAPID key mismatch" if vapid_mismatch else f"gone ({status})"
+            logger.info(f"Push subscription invalid ({reason}), pruning: {e}")
             _prune(subscription.get("endpoint"))
         else:
             logger.error(f"Push send failed: {e}")
