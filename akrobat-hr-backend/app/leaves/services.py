@@ -16,6 +16,7 @@ from app.core.helpers.employee_helper import (
 )
 from app.core.constants import ADMIN
 from app.core.database import supabase_admin
+from app.core import realtime
 from app.notifications.services import notify_employee
 from app.notification_preferences.services import get_preference
 from app.leaves.policy_services import (
@@ -157,6 +158,18 @@ def apply_leave(auth_user_id: str, data, request: Optional[Request] = None):
                 message=notify_message,
                 notification_type="LEAVE",
             )
+
+        # Push to any open dashboard scoped to see this employee (see
+        # app/core/realtime.py) — the manager's Pending Requests widget
+        # and HR/Super Admin's leave queue update immediately instead of
+        # waiting for a manual refresh.
+        realtime.broadcast_threadsafe(
+            {
+                "type": "leave_event",
+                "action": "applied",
+                "employee_id": employee_id,
+            }
+        )
 
         return success_response(message=LEAVE_APPLIED, data=leave_data)
 
@@ -417,6 +430,17 @@ def update_leave_status(
             )
 
         message = LEAVE_APPROVED if data.status == "Approved" else LEAVE_REJECTED
+
+        # Same live-push as apply_leave() above, so the employee's own
+        # "My Leave Requests" and their manager's dashboard both flip to
+        # the new status immediately instead of on next refresh.
+        realtime.broadcast_threadsafe(
+            {
+                "type": "leave_event",
+                "action": data.status.lower(),
+                "employee_id": target_employee_id,
+            }
+        )
 
         return success_response(message=message, data=updated)
 

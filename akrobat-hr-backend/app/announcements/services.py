@@ -5,6 +5,7 @@ from fastapi import HTTPException
 from app.core.database import supabase_admin
 from app.core.responses import success_response
 from app.core.logger import logger
+from app.core import realtime
 from app.notifications.services import notify_employee
 from app.notification_preferences.services import get_preference
 
@@ -91,6 +92,14 @@ def create_announcement(data, user_id: str):
                 )
         except Exception as e:
             logger.error(f"Failed to fan out announcement notifications: {e}")
+
+        # Company-wide event (no employee_id, so every connected
+        # dashboard gets it regardless of scope — see
+        # app/core/realtime.py) so the Announcements panel on every
+        # role's dashboard picks up a new announcement immediately.
+        realtime.broadcast_threadsafe(
+            {"type": "announcement_event", "action": "created"}
+        )
 
         return success_response(
             "Announcement created successfully",
@@ -224,6 +233,10 @@ def update_announcement(announcement_id: str, data: dict):
             .execute()
         )
 
+        realtime.broadcast_threadsafe(
+            {"type": "announcement_event", "action": "updated"}
+        )
+
         return success_response(
             "Announcement updated successfully",
             data=_row_to_api(response.data[0]),
@@ -246,6 +259,10 @@ def delete_announcement(announcement_id: str):
         supabase_admin.table("announcements").delete().eq(
             "id", announcement_id
         ).execute()
+
+        realtime.broadcast_threadsafe(
+            {"type": "announcement_event", "action": "deleted"}
+        )
 
         return {"message": "Announcement deleted successfully"}
 

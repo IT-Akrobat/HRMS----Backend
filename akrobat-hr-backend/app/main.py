@@ -77,7 +77,10 @@ from app.core.csrf import CSRFMiddleware
 from app.core.rbac import has_permission
 from app.core.security import verify_access_token  # add this
 from app.core.rbac import has_permission
-from app.core.helpers.employee_helper import get_employee_id_for_auth_user
+from app.core.helpers.employee_helper import (
+    get_employee_id_for_auth_user,
+    get_all_report_ids,
+)
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
@@ -139,12 +142,22 @@ async def _capture_event_loop():
 
 @app.websocket("/ws/dashboard")
 async def dashboard_ws(websocket: WebSocket):
-    # Live push for the super-admin dashboard: instead of polling
-    # GET /dashboard and GET /audit-logs on a timer, the frontend opens
-    # this socket and gets a message the instant any employee checks
-    # in/out or starts/ends a break (see the broadcast_threadsafe() calls
-    # in app/attendance/services.py), then refetches just those two
-    # endpoints itself.
+    # Live push for any dashboard: instead of polling on a timer or
+    # waiting for a manual refresh, the frontend opens this socket and
+    # gets a message the instant something relevant happens elsewhere —
+    # an employee checks in/out or starts/ends a break (see
+    # app/attendance/services.py), a leave gets applied/approved/
+    # rejected/cancelled (app/leaves/services.py), or an announcement is
+    # created/updated/deleted (app/announcements/services.py) — then
+    # refetches just the endpoint(s) it cares about itself.
+    #
+    # Scoping: VIEW_ALL_ATTENDANCE holders (HR Admin/Executive, Super
+    # Admin) get every event. Everyone else gets a connection scoped to
+    # themselves + their direct/indirect reports (see
+    # app/core/realtime.py) — a Manager sees their team's events, a
+    # plain Employee sees only their own. Company-wide events with no
+    # employee_id (e.g. announcements) reach everyone regardless of
+    # scope.
     #
     # Prefer the httpOnly access-token cookie (same-origin deployments
     # send it automatically on the WS handshake, same as any other
@@ -178,12 +191,34 @@ async def dashboard_ws(websocket: WebSocket):
     except Exception:
         allowed = False
 
+    scope = None  # None = sees every event (VIEW_ALL_ATTENDANCE holders)
+
     if not allowed:
-        await websocket.close(code=4403)
-        return
+        # Not company-wide, but that shouldn't mean "no live updates at
+        # all" -- fall back to a scoped connection covering this caller
+        # plus their direct/indirect reports (empty set for an
+        # individual-contributor Employee, i.e. "just myself"). See the
+        # module docstring in app/core/realtime.py for how scope is
+        # enforced at broadcast time. Only closes the connection if we
+        # can't even resolve an employee_id for this account.
+        try:
+            allowed = has_permission(user.id, "VIEW_ATTENDANCE")
+        except Exception:
+            allowed = False
+
+        if not allowed:
+            await websocket.close(code=4403)
+            return
+
+        employee_id = get_employee_id_for_auth_user(user.id)
+        if not employee_id:
+            await websocket.close(code=4403)
+            return
+
+        scope = {employee_id, *get_all_report_ids(employee_id)}
 
     await websocket.accept()
-    await realtime.register(websocket)
+    await realtime.register(websocket, scope)
     try:
         while True:
             # The client never sends anything meaningful here — this just

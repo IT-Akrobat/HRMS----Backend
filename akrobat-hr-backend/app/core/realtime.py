@@ -1,17 +1,28 @@
 """
-Minimal WebSocket broadcast hub, used to push "something on attendance
-changed" events to any connected admin dashboards the instant they
-happen (see /ws/dashboard in app/main.py), instead of the frontend
-polling on a timer.
+WebSocket broadcast hub, used to push "something changed" events to any
+connected dashboards the instant they happen (attendance check-in/out,
+leave approvals, announcement changes — see the broadcast_threadsafe()
+calls in app/attendance/services.py, app/leaves/services.py and
+app/announcements/services.py), instead of the frontend polling on a
+timer or waiting for a manual page refresh.
 
-Attendance actions (check-in/out, break start/end) run inside plain sync
-`def` route handlers -- see app/attendance/services.py -- which FastAPI
-executes in a worker thread, not on the asyncio event loop that actually
-owns the WebSocket connections below. So a sync caller can't just
-`await` a send; broadcast_threadsafe() hops onto the main event loop via
-asyncio.run_coroutine_threadsafe(), which is safe to call from any
-thread. set_main_loop() captures that loop once, from main.py's startup
-event.
+Scoping: a connection with scope=None (VIEW_ALL_ATTENDANCE holders —
+HR Admin/Executive, and Super Admin which bypasses permission checks
+entirely) receives every event. Anyone else connects with scope set to
+their own employee_id plus every direct/indirect report's employee_id
+(see get_all_report_ids) — a Manager sees events about their team and
+themselves, a plain Employee sees only events about themselves. An
+event with no "employee_id" key (e.g. a company-wide announcement
+change) isn't employee-scoped at all, so it goes to everyone regardless
+of scope.
+
+Attendance/leave actions run inside plain sync `def` route handlers,
+which FastAPI executes in a worker thread, not on the asyncio event
+loop that actually owns the WebSocket connections below. So a sync
+caller can't just `await` a send; broadcast_threadsafe() hops onto the
+main event loop via asyncio.run_coroutine_threadsafe(), which is safe
+to call from any thread. set_main_loop() captures that loop once, from
+main.py's startup event.
 """
 
 import asyncio
@@ -22,7 +33,11 @@ from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
 
-_connections: list[WebSocket] = []
+# Each entry is (websocket, scope). scope is None for connections that
+# should see every event (VIEW_ALL_ATTENDANCE holders), or a set of
+# employee_ids for connections that should only see events about
+# themselves/their reports.
+_connections: list[tuple[WebSocket, Optional[set[str]]]] = []
 _main_loop: Optional[asyncio.AbstractEventLoop] = None
 
 # ---------------------------------------------------------------------------
@@ -41,25 +56,35 @@ def set_main_loop(loop: asyncio.AbstractEventLoop) -> None:
     _main_loop = loop
 
 
-async def register(websocket: WebSocket) -> None:
-    _connections.append(websocket)
+async def register(websocket: WebSocket, scope: Optional[set[str]] = None) -> None:
+    _connections.append((websocket, scope))
 
 
 async def unregister(websocket: WebSocket) -> None:
-    if websocket in _connections:
-        _connections.remove(websocket)
+    global _connections
+    _connections = [(ws, scope) for ws, scope in _connections if ws is not websocket]
+
+
+def _visible_to(scope: Optional[set[str]], event: dict[str, Any]) -> bool:
+    if scope is None:
+        return True
+    employee_id = event.get("employee_id")
+    if employee_id is None:
+        return True
+    return employee_id in scope
 
 
 async def _broadcast(event: dict[str, Any]) -> None:
     dead = []
-    for ws in list(_connections):
+    for ws, scope in list(_connections):
+        if not _visible_to(scope, event):
+            continue
         try:
             await ws.send_json(event)
         except Exception:
             dead.append(ws)
-    for ws in dead:
-        if ws in _connections:
-            _connections.remove(ws)
+    if dead:
+        await asyncio.gather(*(unregister(ws) for ws in dead))
 
 
 def broadcast_threadsafe(event: dict[str, Any]) -> None:
