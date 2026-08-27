@@ -1,6 +1,6 @@
 from typing import Optional
 
-from fastapi import APIRouter, Query, Depends
+from fastapi import APIRouter, Query, Depends, File, UploadFile
 
 from app.holidays.schemas import CreateHolidayRequest, BulkImportHolidaysRequest
 
@@ -11,6 +11,7 @@ from app.holidays.services import (
     update_holiday,
     delete_holiday,
     bulk_import_holidays,
+    import_holidays_from_excel,
     get_saturday_holidays,
 )
 from app.core.rbac import require_permission
@@ -36,6 +37,22 @@ def bulk_import(
     public holiday list). Sunday-shift is applied automatically -- pass
     each holiday's real calendar date as raw_holiday_date."""
     return bulk_import_holidays(data.holidays)
+
+
+@router.post("/bulk-import/excel")
+def bulk_import_excel(
+    file: UploadFile = File(...),
+    country: str = Query(
+        "SG",
+        description="Fallback country for rows that don't have their own Country column.",
+    ),
+    user=Depends(require_permission("EDIT_EMPLOYEE")),
+):
+    """HR/Super Admin: same as POST /holidays/bulk-import, but from an
+    uploaded .xlsx file instead of a JSON body -- for the "Upload Excel"
+    button on the Holidays screen. Expected columns: Holiday Name, Date,
+    Description (optional), Country (optional)."""
+    return import_holidays_from_excel(file, default_country=country)
 
 
 @router.get("/saturday")
