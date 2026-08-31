@@ -80,12 +80,17 @@ def send_push(subscription: dict, title: str, body: str, url: str = "/") -> bool
 
         # A subscription created under a since-rotated VAPID key pair can
         # never succeed again -- the push service (FCM/Mozilla autopush)
-        # rejects it with 403 and this specific message forever, no
-        # matter how many times we retry. Treat it the same as a
-        # gone/expired subscription (404/410): prune it so the row stops
-        # failing silently on every future notification and the user can
-        # get a working subscription again next time they open the app.
-        vapid_mismatch = status == 403 and "do not correspond" in body.lower()
+        # rejects it forever, no matter how many times we retry. FCM has
+        # been observed returning either 403 with a "do not correspond"
+        # body OR a bare 401 Unauthorized for this same underlying cause
+        # (an application-server-key/private-key mismatch), so both are
+        # treated as permanent. Same bucket as a gone/expired subscription
+        # (404/410): prune it so the row stops failing silently on every
+        # future notification and the user gets a working subscription
+        # again next time they open the app (see pushService.js, which
+        # re-subscribes automatically on login if no local subscription
+        # exists).
+        vapid_mismatch = status in (401, 403)
 
         if status in (404, 410) or vapid_mismatch:
             reason = "VAPID key mismatch" if vapid_mismatch else f"gone ({status})"
