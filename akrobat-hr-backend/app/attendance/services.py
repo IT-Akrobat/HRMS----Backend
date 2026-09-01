@@ -1267,6 +1267,12 @@ def arrive_at_outdoor_visit(auth_user_id: str, data, request: Optional[Request] 
             target_employee_id=employee_id,
             record_id=attendance["id"],
             description=f"Checked in from outside office{f' — {data.purpose}' if data.purpose else ''}",
+            # extractCoords() on the Audit Logs page reads changes.latitude /
+            # changes.longitude (see Auditlogs.jsx) to reverse-geocode and
+            # show the Location column/detail — without new_values here,
+            # the GPS fix was saved to attendance_outdoor_visits correctly
+            # but never reached the audit row, so Location always showed "—".
+            new_values={"latitude": data.latitude, "longitude": data.longitude},
             request=request,
         )
 
@@ -1311,6 +1317,15 @@ def depart_outdoor_visit(auth_user_id: str, data, request: Optional[Request] = N
             description=(
                 f"Ended outdoor check-in — "
                 f"{_format_duration_minutes(record.get('duration_minutes'))}"
+            ),
+            # Same reasoning as OUTDOOR_VISIT_ARRIVE above — data.latitude/
+            # longitude are optional here, so only include them when present
+            # rather than writing an explicit {latitude: None} that would
+            # otherwise overwrite a real arrival fix in some future diff use.
+            new_values=(
+                {"latitude": data.latitude, "longitude": data.longitude}
+                if data.latitude is not None and data.longitude is not None
+                else None
             ),
             request=request,
         )
