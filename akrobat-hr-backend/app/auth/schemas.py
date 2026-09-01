@@ -84,6 +84,12 @@ class MeProfile(BaseModel):
     religion: Optional[str] = None
     address: Optional[str] = None
 
+    # Drives whether the frontend shows the "Check in from meeting/site"
+    # card at all — see app/auth/services.py::get_me and sql/030.sql.
+    # Must stay declared here or it gets silently stripped by
+    # response_model validation, same as the fields above once did.
+    outdoor_checkin_enabled: Optional[bool] = None
+
 
 class MeResponse(BaseModel):
     id: str
