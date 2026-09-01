@@ -172,6 +172,13 @@ class EmployeeUpdate(BaseModel):
 
     works_saturday: Optional[bool] = None
 
+    # Ad-hoc outdoor/meeting check-in (sql/030.sql). Off by default for
+    # every employee -- HR/Admin flips this per-person for whoever
+    # occasionally needs to check in from a meeting/site instead of the
+    # office. Deliberately not tied to department/role: even within
+    # Account/HR/Logistics only some staff, sometimes, need this.
+    outdoor_checkin_enabled: Optional[bool] = None
+
 
 # ==========================================
 # Employee Response

@@ -11,6 +11,8 @@ from app.attendance.schemas import (
     SiteVisitArriveRequest,
     SiteVisitDepartRequest,
     SiteVisitPingRequest,
+    OutdoorVisitArriveRequest,
+    OutdoorVisitDepartRequest,
 )
 
 from app.attendance.services import (
@@ -42,6 +44,9 @@ from app.attendance.services import (
     get_org_site_visits_history,
     get_employee_site_visits_history,
     get_site_visit_compliance_status,
+    arrive_at_outdoor_visit,
+    depart_outdoor_visit,
+    get_my_outdoor_visits_today,
 )
 
 from app.core.security import get_current_user
@@ -187,6 +192,34 @@ def site_visits_for_day(
     user=Depends(require_permission("VIEW_ATTENDANCE")),
 ):
     return get_site_visits_for_attendance(attendance_id)
+
+
+# ==========================================
+# AD-HOC OUTDOOR / MEETING CHECK-IN (only for employees with
+# employees.outdoor_checkin_enabled = true — see sql/030.sql. No
+# permission gate here: eligibility is enforced per-employee inside
+# arrive_at_outdoor_visit() itself, same as how site-visit eligibility
+# is enforced via _enforce_assigned_site rather than a route-level dep.)
+# ==========================================
+
+
+@router.post("/outdoor-visit/arrive")
+def outdoor_visit_arrive(
+    data: OutdoorVisitArriveRequest, request: Request, user=Depends(get_current_user)
+):
+    return arrive_at_outdoor_visit(user.id, data, request=request)
+
+
+@router.post("/outdoor-visit/depart")
+def outdoor_visit_depart(
+    data: OutdoorVisitDepartRequest, request: Request, user=Depends(get_current_user)
+):
+    return depart_outdoor_visit(user.id, data, request=request)
+
+
+@router.get("/outdoor-visit/today")
+def outdoor_visit_today(user=Depends(get_current_user)):
+    return get_my_outdoor_visits_today(user.id)
 
 
 # ==========================================

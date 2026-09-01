@@ -87,3 +87,31 @@ class SiteVisitPingRequest(BaseModel):
     latitude: float
 
     longitude: float
+
+
+# ==========================================
+# AD-HOC OUTDOOR / MEETING CHECK-IN (any employee with
+# employees.outdoor_checkin_enabled = true -- see sql/030.sql)
+# ==========================================
+
+
+class OutdoorVisitArriveRequest(BaseModel):
+
+    latitude: float
+
+    longitude: float
+
+    purpose: Optional[str] = None
+
+    address_text: Optional[str] = None
+
+    notes: Optional[str] = None
+
+
+class OutdoorVisitDepartRequest(BaseModel):
+
+    latitude: Optional[float] = None
+
+    longitude: Optional[float] = None
+
+    notes: Optional[str] = None

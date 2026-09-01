@@ -315,6 +315,7 @@ def get_me(auth_user) -> dict:
             address,
             work_location,
             manager_id,
+            outdoor_checkin_enabled,
 
             departments!employees_department_id_fkey(
                 id,
@@ -434,5 +435,10 @@ def get_me(auth_user) -> dict:
             "blood_group": employee.get("blood_group"),
             "religion": employee.get("religion"),
             "address": employee.get("address"),
+            # Drives whether the frontend shows the "Check in from
+            # meeting/site" button at all — see SKILL/README notes in
+            # sql/030.sql. False for everyone until HR enables it
+            # per-employee.
+            "outdoor_checkin_enabled": bool(employee.get("outdoor_checkin_enabled")),
         },
     }

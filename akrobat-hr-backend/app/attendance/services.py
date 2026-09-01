@@ -1192,6 +1192,207 @@ def depart_site(auth_user_id: str, data, request: Optional[Request] = None):
         internal_server_error("Unable to log site departure.")
 
 
+# ==========================================================================
+# AD-HOC OUTDOOR / MEETING CHECK-IN
+# ==========================================================================
+# For employees who are NOT pre-assigned to any site (Account, HR,
+# Logistics, etc.) but occasionally go straight to a client meeting or
+# site survey. Gated per-employee (employees.outdoor_checkin_enabled,
+# default false — sql/030.sql) rather than by role/department: most
+# employees in every department never need this, so it must stay
+# invisible for everyone until HR turns it on for a specific person.
+# No location_id — these places aren't in the `locations` master list —
+# so we log raw GPS + a free-text purpose/address instead.
+
+
+def _require_outdoor_checkin_enabled(employee_id: str):
+    employee = (
+        supabase_admin.table("employees")
+        .select("outdoor_checkin_enabled")
+        .eq("id", employee_id)
+        .maybe_single()
+        .execute()
+    )
+
+    if not employee.data or not employee.data.get("outdoor_checkin_enabled"):
+        forbidden(
+            "Outdoor check-in isn't enabled for your account. Ask HR to enable it if you need it."
+        )
+
+
+def arrive_at_outdoor_visit(auth_user_id: str, data, request: Optional[Request] = None):
+    """
+    "Checking in from a meeting/site" — the ad-hoc equivalent of
+    arrive_at_site(), for employees with no fixed site assignment. Same
+    auto-close-previous-visit behaviour as arrive_at_site, so someone
+    who goes from one meeting straight to another doesn't need a
+    separate depart step in between.
+    """
+    try:
+        employee_id = get_employee_id_for_auth_user(auth_user_id)
+
+        if not employee_id:
+            forbidden("No employee profile is linked to this account.")
+
+        _require_outdoor_checkin_enabled(employee_id)
+
+        attendance = _get_open_attendance_or_400(employee_id)
+
+        arrival_time = _now_utc()
+
+        _close_open_outdoor_visit(attendance["id"], arrival_time)
+
+        inserted = (
+            supabase_admin.table("attendance_outdoor_visits")
+            .insert(
+                {
+                    "attendance_id": attendance["id"],
+                    "employee_id": employee_id,
+                    "purpose": data.purpose,
+                    "address_text": data.address_text,
+                    "arrival_time": arrival_time.isoformat(),
+                    "arrival_latitude": data.latitude,
+                    "arrival_longitude": data.longitude,
+                    "notes": data.notes,
+                }
+            )
+            .execute()
+        )
+        record = inserted.data[0] if inserted.data else None
+
+        record_audit_log(
+            module="ATTENDANCE",
+            action="OUTDOOR_VISIT_ARRIVE",
+            performed_by=auth_user_id,
+            target_employee_id=employee_id,
+            record_id=attendance["id"],
+            description=f"Checked in from outside office{f' — {data.purpose}' if data.purpose else ''}",
+            request=request,
+        )
+
+        return success_response(message="Outdoor check-in logged.", data=record)
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception(e)
+        internal_server_error("Unable to log outdoor check-in.")
+
+
+def depart_outdoor_visit(auth_user_id: str, data, request: Optional[Request] = None):
+    """Explicit "Back to normal" / "Done" for the last open outdoor visit of the day."""
+    try:
+        employee_id = get_employee_id_for_auth_user(auth_user_id)
+
+        if not employee_id:
+            forbidden("No employee profile is linked to this account.")
+
+        attendance = _get_open_attendance_or_400(employee_id)
+
+        record = _close_open_outdoor_visit(
+            attendance["id"], _now_utc(), data.latitude, data.longitude
+        )
+
+        if not record:
+            bad_request("You don't have an open outdoor check-in today.")
+
+        if data.notes:
+            supabase_admin.table("attendance_outdoor_visits").update(
+                {"notes": data.notes}
+            ).eq("id", record["id"]).execute()
+
+        record_audit_log(
+            module="ATTENDANCE",
+            action="OUTDOOR_VISIT_DEPART",
+            performed_by=auth_user_id,
+            target_employee_id=employee_id,
+            record_id=attendance["id"],
+            description=(
+                f"Ended outdoor check-in — "
+                f"{_format_duration_minutes(record.get('duration_minutes'))}"
+            ),
+            request=request,
+        )
+
+        return success_response(message="Outdoor check-in ended.", data=record)
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception(e)
+        internal_server_error("Unable to end outdoor check-in.")
+
+
+def _close_open_outdoor_visit(
+    attendance_id: str, at_time: datetime, latitude=None, longitude=None
+):
+    open_visit = (
+        supabase_admin.table("attendance_outdoor_visits")
+        .select("*")
+        .eq("attendance_id", attendance_id)
+        .is_("departure_time", "null")
+        .order("arrival_time", desc=True)
+        .limit(1)
+        .execute()
+    )
+
+    if not open_visit.data:
+        return None
+
+    visit = open_visit.data[0]
+    arrival = datetime.fromisoformat(visit["arrival_time"])
+    duration_minutes = max(0, int((at_time - arrival).total_seconds() / 60))
+
+    updated = (
+        supabase_admin.table("attendance_outdoor_visits")
+        .update(
+            {
+                "departure_time": at_time.isoformat(),
+                "duration_minutes": duration_minutes,
+                "departure_latitude": latitude,
+                "departure_longitude": longitude,
+                "updated_at": _now_utc().isoformat(),
+            }
+        )
+        .eq("id", visit["id"])
+        .execute()
+    )
+
+    return updated.data[0] if updated.data else None
+
+
+def get_my_outdoor_visits_today(auth_user_id: str):
+    try:
+        employee_id = get_employee_id_for_auth_user(auth_user_id)
+        if not employee_id:
+            return success_response(message="No employee profile linked.", data=[])
+
+        today = date.today()
+        attendance = attendance_repo.find_one(
+            {"employee_id": employee_id, "attendance_date": today.isoformat()}
+        )
+        if not attendance:
+            return success_response(message="No attendance today.", data=[])
+
+        response = (
+            supabase_admin.table("attendance_outdoor_visits")
+            .select("*")
+            .eq("attendance_id", attendance["id"])
+            .order("arrival_time")
+            .execute()
+        )
+
+        return success_response(
+            message="Today's outdoor check-ins fetched.", data=response.data or []
+        )
+
+    except Exception as e:
+        logger.exception(e)
+        internal_server_error("Unable to fetch outdoor check-ins.")
+
+
 # How far (in meters) an open site visit's live ping can drift from the
 # site's configured lat/lon before it's flagged as "left the site" and a
 # manager/super-admin notification fires. Deliberately separate from a
