@@ -2,9 +2,9 @@ from pydantic import BaseModel
 from typing import Optional
 
 
-# All five toggles from Settings.jsx's "Notifications" tab. Every field is
-# optional on the update payload so the frontend can PUT the whole form
-# every time it saves without needing partial-patch semantics.
+# All seven toggles from Settings.jsx's "Notifications" tab. Every field
+# is optional on the update payload so the frontend can PUT the whole
+# form every time it saves without needing partial-patch semantics.
 class UpdateNotificationPreferencesRequest(BaseModel):
 
     email_notifications: Optional[bool] = None
@@ -16,6 +16,10 @@ class UpdateNotificationPreferencesRequest(BaseModel):
     celebrations: Optional[bool] = None
 
     attendance_reminders: Optional[bool] = None
+
+    checkout_reminders: Optional[bool] = None
+
+    holiday_reminders: Optional[bool] = None
 
 
 class NotificationPreferencesResponse(BaseModel):
@@ -31,3 +35,7 @@ class NotificationPreferencesResponse(BaseModel):
     celebrations: bool
 
     attendance_reminders: bool
+
+    checkout_reminders: bool
+
+    holiday_reminders: bool

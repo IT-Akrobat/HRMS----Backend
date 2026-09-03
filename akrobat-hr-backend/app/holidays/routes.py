@@ -13,6 +13,7 @@ from app.holidays.services import (
     bulk_import_holidays,
     import_holidays_from_excel,
     get_saturday_holidays,
+    get_holiday_reminder_status,
 )
 from app.core.rbac import require_permission
 from app.core.security import get_current_user
@@ -75,6 +76,19 @@ def get_all(
     user=Depends(get_current_user),
 ):
     return get_holidays(country=country)
+
+
+# Self-service "is a holiday coming up?" check -- polled by the frontend
+# (Header.jsx, alongside the attendance/celebrations reminder polls).
+# Sends an advance "tomorrow is a holiday" notice the day before, plus a
+# same-day fallback notice, gated by the requesting employee's own
+# "Holiday reminders" toggle in Settings -> Notifications. Registered
+# before /{holiday_id} so "reminder-check" isn't swallowed by the path
+# parameter. See get_holiday_reminder_status() docstring for full
+# conditions.
+@router.get("/reminder-check")
+def holiday_reminder_check(user=Depends(get_current_user)):
+    return get_holiday_reminder_status(user.id)
 
 
 @router.get("/{holiday_id}")

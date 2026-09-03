@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from io import BytesIO
 from typing import Optional
 
@@ -7,6 +7,10 @@ from fastapi import HTTPException, UploadFile
 
 from app.core.database import supabase_admin
 from app.core.responses import success_response
+from app.core.logger import logger
+from app.core.helpers.employee_helper import get_employee_id_for_auth_user
+from app.notifications.services import notify_employee
+from app.notification_preferences.services import get_preference
 
 
 def _apply_sunday_shift(raw_date: date) -> tuple[date, bool]:
@@ -331,3 +335,137 @@ def delete_holiday(holiday_id: str):
     (supabase_admin.table("holidays").delete().eq("id", holiday_id).execute())
 
     return {"message": "Holiday deleted successfully"}
+
+
+# =========================
+# HOLIDAY REMINDER
+# =========================
+#
+# Self-service "is a holiday coming up?" check -- same "no background
+# scheduler exists in this backend" constraint as
+# attendance.get_attendance_reminder_status() / notifications.
+# get_celebrations_status() (see those docstrings), so this is polled by
+# the frontend (Header.jsx, alongside the other reminder polls) instead
+# of running on a cron.
+#
+# Deliberately checks BOTH tomorrow's date and today's:
+#   - tomorrow's holiday(s) fire an ADVANCE notice ("tomorrow is a
+#     holiday") the day before, so people aren't finding out the morning
+#     of -- this is the main point of the feature.
+#   - today's holiday(s) also fire a same-day notice, as a fallback for
+#     anyone who didn't get the advance one (holiday added same-day,
+#     employee joined after the advance notice already went out, etc.)
+#     so the information is never simply missed.
+#
+# Gated by the requesting employee's own "Holiday reminders" preference
+# (defaults to ON -- see notification_preferences DEFAULTS -- since this
+# is informational, not a nag). No country filter: employees aren't
+# tagged with a country in this schema, so every holiday row is treated
+# as relevant to everyone rather than silently hiding one calendar's
+# holidays from staff who happen to be on the other.
+
+
+def get_holiday_reminder_status(auth_user_id: str):
+    try:
+        employee_id = get_employee_id_for_auth_user(auth_user_id)
+        if not employee_id:
+            return success_response(
+                message="No holiday reminder due.", data={"holidays": []}
+            )
+
+        if not get_preference(employee_id, "holiday_reminders"):
+            return success_response(
+                message="No holiday reminder due.", data={"holidays": []}
+            )
+
+        today = date.today()
+        tomorrow = today + timedelta(days=1)
+
+        try:
+            response = (
+                supabase_admin.table("holidays")
+                .select("holiday_name, holiday_date")
+                .in_("holiday_date", [today.isoformat(), tomorrow.isoformat()])
+                .execute()
+            )
+            rows = response.data or []
+        except Exception as e:
+            logger.error(f"Unable to check upcoming holidays: {e}")
+            return success_response(
+                message="No holiday reminder due.", data={"holidays": []}
+            )
+
+        if not rows:
+            return success_response(
+                message="No holiday reminder due.", data={"holidays": []}
+            )
+
+        due = []
+        for row in rows:
+            name = row.get("holiday_name") or "a company holiday"
+            holiday_date = row.get("holiday_date")
+            if holiday_date == tomorrow.isoformat():
+                due.append(
+                    {
+                        "title": "Holiday Tomorrow",
+                        "message": (
+                            f"Due to {name}, tomorrow "
+                            f"({tomorrow.strftime('%d %b %Y')}) is a holiday."
+                        ),
+                    }
+                )
+            elif holiday_date == today.isoformat():
+                due.append(
+                    {
+                        "title": "Holiday Today",
+                        "message": f"Due to {name}, today is a holiday.",
+                    }
+                )
+
+        if not due:
+            return success_response(
+                message="No holiday reminder due.", data={"holidays": []}
+            )
+
+        # Dedup per requesting employee per day, same idea as the
+        # attendance reminder's / celebrations' notification-row dedup.
+        day_start = datetime.combine(today, time(0, 0)).isoformat()
+        already_sent = (
+            supabase_admin.table("notifications")
+            .select("message")
+            .eq("user_id", employee_id)
+            .eq("notification_type", "HOLIDAY_REMINDER")
+            .gte("created_at", day_start)
+            .execute()
+        )
+        already_sent_messages = {
+            row.get("message") for row in (already_sent.data or [])
+        }
+
+        sent = []
+        for item in due:
+            if item["message"] in already_sent_messages:
+                continue
+            notify_employee(
+                employee_id,
+                title=item["title"],
+                message=item["message"],
+                notification_type="HOLIDAY_REMINDER",
+            )
+            sent.append(item["message"])
+
+        return success_response(
+            message="Holiday reminders checked.",
+            data={"holidays": sent},
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        # Best-effort background check -- never let this bubble up as a
+        # 500 to a page that's just polling.
+        logger.error(f"Holiday reminder check failed for {auth_user_id}: {e}")
+        return success_response(
+            message="No holiday reminder due.", data={"holidays": []}
+        )

@@ -19,6 +19,7 @@ from app.attendance.services import (
     check_in,
     check_out,
     get_attendance_reminder_status,
+    get_checkout_reminder_status,
     start_break,
     end_break,
     get_my_attendance,
@@ -84,6 +85,20 @@ def employee_check_out(
     data: CheckOutRequest, request: Request, user=Depends(get_current_user)
 ):
     return check_out(user.id, data, request=request)
+
+
+# Self-service "have I forgotten to check out today?" check -- the
+# check-out counterpart to /reminder-check above, polled the same way by
+# Header.jsx. Fires a real "CHECKOUT_REMINDER" notification the first
+# time it detects the employee checked in but never checked out and
+# their shift has ended; a no-op every other time. Gated by its own
+# "Checkout reminders" toggle in Settings -> Notifications (separate
+# from "Attendance reminders", which only covers check-in). See
+# get_checkout_reminder_status() docstring for the full set of
+# conditions.
+@router.get("/checkout-reminder-check")
+def checkout_reminder_check(user=Depends(get_current_user)):
+    return get_checkout_reminder_status(user.id)
 
 
 @router.post("/break-start")

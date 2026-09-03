@@ -839,6 +839,156 @@ def get_attendance_reminder_status(auth_user_id: str):
         )
 
 
+# =========================
+# CHECKOUT REMINDER
+# =========================
+#
+# Same "have I forgotten to..." self-service check as
+# get_attendance_reminder_status() above, mirrored for the other end of
+# the day: an employee who checked in but never checked out. Polled by
+# Header.jsx (see the reminder-check poll) alongside the check-in
+# reminder, every few minutes while the employee is logged in -- there's
+# still no background scheduler in this backend, so nothing else could
+# fire this at shift-end time.
+#
+# Gated by its own "Checkout reminders" toggle (checkout_reminders on
+# notification_preferences, added alongside attendance_reminders --
+# deliberately a separate column/toggle rather than reusing
+# attendance_reminders, since an employee may want to be nudged about a
+# missed check-in but not a missed check-out, or vice versa). Read
+# directly from the table the same way attendance_reminders is above,
+# for the same reason noted there (avoids a cross-module import into
+# notification_preferences).
+#
+# Silently no-ops (reminder_due: False) whenever: the "Checkout
+# reminders" preference is off (or never set -- defaults to off),
+# there's no resolved shift for today, the employee never checked in
+# today, they've already checked out, the shift (+ grace) hasn't ended
+# yet, or a reminder already went out today. Never raises.
+
+
+def get_checkout_reminder_status(auth_user_id: str):
+    try:
+        employee_id = get_employee_id_for_auth_user(auth_user_id)
+        if not employee_id:
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        pref = (
+            supabase_admin.table("notification_preferences")
+            .select("checkout_reminders")
+            .eq("employee_id", employee_id)
+            .maybe_single()
+            .execute()
+        )
+        # No row yet -- matches notification_preferences DEFAULTS
+        # (checkout_reminders: False) until the employee opts in via
+        # Settings -> Notifications -> Save preferences.
+        if not pref or not pref.data or not pref.data.get("checkout_reminders"):
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        today = date.today()
+
+        attendance = (
+            supabase_admin.table("attendance")
+            .select("id, check_in_time, check_out_time")
+            .eq("employee_id", employee_id)
+            .eq("attendance_date", today.isoformat())
+            .maybe_single()
+            .execute()
+        )
+        # Never checked in today (or no row yet) -- nothing to remind
+        # them to check out of.
+        if (
+            not attendance
+            or not attendance.data
+            or not attendance.data.get("check_in_time")
+        ):
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+        # Already checked out -- done for the day.
+        if attendance.data.get("check_out_time"):
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        rule = _get_attendance_rule()
+        shift = _get_employee_shift(employee_id, today)
+        if not shift or not shift.get("end_time"):
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        hh, mm, *_ = str(shift["end_time"]).split(":")
+        company_tz = _get_company_timezone()
+        scheduled_end_local = datetime.combine(
+            today, time(int(hh), int(mm)), tzinfo=company_tz
+        )
+        # Overnight shifts (end_time earlier than start_time) roll to the
+        # next day -- same convention used by the site-visit compliance
+        # check above, otherwise this would fire hours too early.
+        if shift.get("start_time") and str(shift["end_time"]) < str(
+            shift["start_time"]
+        ):
+            scheduled_end_local += timedelta(days=1)
+        scheduled_end = scheduled_end_local.astimezone(timezone.utc).replace(
+            tzinfo=None
+        )
+
+        grace = shift.get("grace_period")
+        if grace is None:
+            grace = rule.get("late_grace_minutes", 0)
+
+        if _now_utc() < scheduled_end + timedelta(minutes=grace):
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        day_start = datetime.combine(today, time(0, 0)).isoformat()
+        already_reminded = (
+            supabase_admin.table("notifications")
+            .select("id")
+            .eq("user_id", employee_id)
+            .eq("notification_type", "CHECKOUT_REMINDER")
+            .gte("created_at", day_start)
+            .limit(1)
+            .execute()
+        )
+        if already_reminded and already_reminded.data:
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        shift_end_label = scheduled_end_local.strftime("%I:%M %p").lstrip("0")
+
+        notify_employee(
+            employee_id,
+            title="Checkout reminder",
+            message=(
+                f"You haven't checked out yet — your shift ended at "
+                f"{shift_end_label}."
+            ),
+            notification_type="CHECKOUT_REMINDER",
+        )
+
+        return success_response(
+            message="Reminder sent.",
+            data={"reminder_due": True, "shift_end": shift_end_label},
+        )
+
+    except Exception as e:
+        # Best-effort background check -- never let this bubble up as a
+        # 500 to a page that's just polling.
+        logger.error(f"Checkout reminder check failed for {auth_user_id}: {e}")
+        return success_response(
+            message="No reminder due.", data={"reminder_due": False}
+        )
+
+
 # ==========================================================================
 # BREAKS (multiple breaks per day)
 # ==========================================================================

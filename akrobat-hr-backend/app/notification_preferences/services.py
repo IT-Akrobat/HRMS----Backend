@@ -8,15 +8,17 @@ from app.core.helpers.employee_helper import get_employee_id_for_auth_user
 
 # ---------------------------------------------------------------------------
 # Backs the Notifications tab in Settings.jsx (Account / Security /
-# Notifications / Preferences). Previously these five toggles only ever
+# Notifications / Preferences). Previously these toggles only ever
 # lived in localStorage (see Settings.jsx saveNotifications()) -- this
 # module is the real store so:
 #   1. Preferences follow the employee across devices/browsers instead of
 #      being stuck on whichever machine they last clicked "Save" on.
-#   2. Other parts of the backend (see attendance.get_attendance_reminder_status,
-#      which reads this table directly) can actually respect the toggle --
-#      "Attendance reminders" being OFF here is what stops that reminder
-#      from firing at all.
+#   2. Other parts of the backend (see attendance.get_attendance_reminder_status
+#      and attendance.get_checkout_reminder_status, which read this table
+#      directly) can actually respect the toggle -- "Attendance reminders"
+#      / "Checkout reminders" being OFF here is what stops those reminders
+#      from firing at all. holidays.get_holiday_reminder_status reads
+#      "holiday_reminders" the normal way, through get_preference() below.
 #
 # One row per employee, keyed by employee_id (sql/020_notification_preferences.sql).
 # Defaults mirror Settings.jsx's NOTIF_DEFAULTS exactly, so a first-time
@@ -30,6 +32,8 @@ DEFAULTS = {
     "announcements": True,
     "celebrations": True,
     "attendance_reminders": False,
+    "checkout_reminders": False,
+    "holiday_reminders": True,
 }
 
 
