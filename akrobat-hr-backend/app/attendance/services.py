@@ -504,7 +504,22 @@ def check_in(auth_user_id: str, data, request: Optional[Request] = None):
             payload["ip_address"] = get_client_ip(request)
             payload["device_info"] = request.headers.get("user-agent")
 
-        attendance_data = attendance_repo.create(payload)
+        try:
+            attendance_data = attendance_repo.create(payload)
+        except HTTPException as e:
+            # Two check-in requests for the same employee can race past
+            # the find_one() check above (a double-tap before the button's
+            # disabled state re-renders, a network retry, two tabs/devices)
+            # and both reach this insert. The unique constraint on
+            # (employee_id, attendance_date) added in sql/032.sql is what
+            # actually stops the duplicate row from being written; this
+            # just turns that DB-level rejection into the same friendly
+            # message the normal already-checked-in path above returns,
+            # instead of SupabaseRepository.create()'s generic 500.
+            detail = str(e.detail or "").lower()
+            if "duplicate key" in detail or "23505" in detail or "unique" in detail:
+                bad_request("You have already checked in today.")
+            raise
 
         # Notify every SUPER ADMIN on every check-in (not managers — this
         # is deliberately scoped narrower than the leave-request fan-out
