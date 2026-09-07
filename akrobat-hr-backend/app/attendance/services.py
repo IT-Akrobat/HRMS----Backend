@@ -834,7 +834,23 @@ def get_attendance_reminder_status(auth_user_id: str):
                 message="No reminder due.", data={"reminder_due": False}
             )
 
-        shift_start_label = scheduled_start_ist.strftime("%I:%M %p").lstrip("0")
+        # Was `scheduled_start_ist`, a name that's never defined anywhere
+        # in this function (the variable above is `scheduled_start`) --
+        # so this raised a NameError every single time a reminder was
+        # actually due, silently caught by the broad except at the
+        # bottom of this function and logged as "reminder check failed",
+        # then reported back to the frontend as an innocuous
+        # reminder_due: False. Net effect: this feature has never
+        # actually sent a reminder, and nothing in the UI would have
+        # shown that it was broken.
+        #
+        # Use `scheduled_start_local` (still tz-aware, in company_tz),
+        # not `scheduled_start` -- that one's already been converted to
+        # naive UTC a few lines up specifically for the UTC comparison
+        # above, so formatting it directly would print the UTC clock
+        # time, not the company-local shift-start time this label is
+        # supposed to show.
+        shift_start_label = scheduled_start_local.strftime("%I:%M %p").lstrip("0")
 
         notify_employee(
             employee_id,
@@ -855,6 +871,155 @@ def get_attendance_reminder_status(auth_user_id: str):
         # Best-effort background check -- never let this bubble up as a
         # 500 to a page that's just polling.
         logger.error(f"Attendance reminder check failed for {auth_user_id}: {e}")
+        return success_response(
+            message="No reminder due.", data={"reminder_due": False}
+        )
+
+
+# ==========================================================================
+# CHECKOUT REMINDER (self-service "have I forgotten to check out?" check)
+# ==========================================================================
+
+
+def get_checkout_reminder_status(auth_user_id: str):
+    """
+    Self-service "have I forgotten to check out?" check -- the check-out
+    counterpart to get_attendance_reminder_status() above. Polled the same
+    way by Header.jsx (see /checkout-reminder-check).
+
+    Uses the same shift-resolution rules as check_out() / the site-visit
+    compliance check (_get_employee_shift / _get_attendance_rule,
+    company-tz-aware, with the same overnight-shift end-time rollover),
+    so "shift end" here always agrees with what a check-out would have
+    been scored against. Writes ONE "CHECKOUT_REMINDER" notification via
+    notify_employee() once the employee is confirmed
+    checked-in-but-not-out past their shift end -- deduped per employee
+    per day the same way the check-in reminder is.
+
+    Silently no-ops (reminder_due: False) whenever: the "Checkout
+    reminders" preference is off (or never set -- defaults to off),
+    there's no resolved shift for today, today is a weekly off, the
+    employee never checked in today, they've already checked out, or a
+    reminder already went out today. Never raises -- a broken check here
+    should never surface as an error to a page that's just polling in
+    the background.
+    """
+    try:
+        employee_id = get_employee_id_for_auth_user(auth_user_id)
+        if not employee_id:
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        pref = (
+            supabase_admin.table("notification_preferences")
+            .select("checkout_reminders")
+            .eq("employee_id", employee_id)
+            .maybe_single()
+            .execute()
+        )
+        # No row yet -- matches notification_preferences DEFAULTS
+        # (checkout_reminders: False) until the employee opts in via
+        # Settings -> Notifications -> Save preferences.
+        if not pref or not pref.data or not pref.data.get("checkout_reminders"):
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        today = _today_in_company_tz()
+
+        # Same fixed weekly-off convention used by the check-in reminder.
+        if today.weekday() == 6:
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        rule = _get_attendance_rule()
+        shift = _get_employee_shift(employee_id, today)
+        if not shift or not shift.get("end_time"):
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        hh, mm, *_ = str(shift["end_time"]).split(":")
+        company_tz = _get_company_timezone()
+        scheduled_end_local = datetime.combine(
+            today, time(int(hh), int(mm)), tzinfo=company_tz
+        )
+        # Overnight shifts (end_time earlier than start_time) roll to the
+        # next day -- same convention used elsewhere for shift math.
+        if shift.get("start_time") and str(shift["end_time"]) < str(
+            shift["start_time"]
+        ):
+            scheduled_end_local += timedelta(days=1)
+        scheduled_end = scheduled_end_local.astimezone(timezone.utc).replace(
+            tzinfo=None
+        )
+
+        grace = shift.get("grace_period")
+        if grace is None:
+            grace = rule.get("late_grace_minutes", 0)
+
+        if _now_utc() < scheduled_end + timedelta(minutes=grace):
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        existing = (
+            supabase_admin.table("attendance")
+            .select("id, check_in_time, check_out_time")
+            .eq("employee_id", employee_id)
+            .eq("attendance_date", today.isoformat())
+            .maybe_single()
+            .execute()
+        )
+        if not existing or not existing.data or not existing.data.get("check_in_time"):
+            # Never checked in today -- nothing to remind them to close out.
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        if existing.data.get("check_out_time"):
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        day_start = datetime.combine(today, time(0, 0)).isoformat()
+        already_reminded = (
+            supabase_admin.table("notifications")
+            .select("id")
+            .eq("user_id", employee_id)
+            .eq("notification_type", "CHECKOUT_REMINDER")
+            .gte("created_at", day_start)
+            .limit(1)
+            .execute()
+        )
+        if already_reminded and already_reminded.data:
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        shift_end_label = scheduled_end_local.strftime("%I:%M %p").lstrip("0")
+
+        notify_employee(
+            employee_id,
+            title="Checkout reminder",
+            message=(
+                f"You haven't checked out yet — your shift ended at "
+                f"{shift_end_label}."
+            ),
+            notification_type="CHECKOUT_REMINDER",
+        )
+
+        return success_response(
+            message="Reminder sent.",
+            data={"reminder_due": True, "shift_end": shift_end_label},
+        )
+
+    except Exception as e:
+        # Best-effort background check -- never let this bubble up as a
+        # 500 to a page that's just polling.
+        logger.error(f"Checkout reminder check failed for {auth_user_id}: {e}")
         return success_response(
             message="No reminder due.", data={"reminder_due": False}
         )
