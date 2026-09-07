@@ -101,6 +101,27 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+# Every "today = date.today()" in this file used to mean "today according
+# to whatever OS timezone the server happens to run in" -- almost always
+# UTC. That silently broke the whole point of an attendance day boundary
+# for Singapore (UTC+8) and India (UTC+5:30) staff: for roughly the first
+# ~16 hours of a Singapore local day (00:00-16:00 SGT) the UTC calendar
+# date is still *yesterday*, so check_in()/check_out() (and every other
+# "today's attendance row" lookup below) were filing/looking up the wrong
+# day. Concretely: an employee checking in on a normal SGT morning would
+# get matched against *yesterday's* already-existing attendance row and
+# rejected with "You have already checked in today" -- despite never
+# having checked in that morning at all, since the server's clock hadn't
+# rolled its own UTC date over yet.
+#
+# _get_company_timezone() already exists (used for late_minutes) -- this
+# just applies that same timezone to the day-boundary itself, so "today"
+# here always means the company's actual local calendar day, not the
+# server host's OS timezone.
+def _today_in_company_tz() -> date:
+    return datetime.now(_get_company_timezone()).date()
+
+
 # ==========================================================================
 # POLICY RESOLUTION — shift + attendance_rules drive every calculation
 # below; nothing is hardcoded to a fixed 9-to-5.
@@ -444,7 +465,7 @@ def check_in(auth_user_id: str, data, request: Optional[Request] = None):
         if not employee_id:
             forbidden("No employee profile is linked to this account.")
 
-        today = date.today()
+        today = _today_in_company_tz()
 
         if attendance_repo.find_one(
             {"employee_id": employee_id, "attendance_date": today.isoformat()}
@@ -580,7 +601,7 @@ def check_out(auth_user_id: str, data, request: Optional[Request] = None):
         if not employee_id:
             forbidden("No employee profile is linked to this account.")
 
-        today = date.today()
+        today = _today_in_company_tz()
 
         existing = attendance_repo.find_one(
             {"employee_id": employee_id, "attendance_date": today.isoformat()}
@@ -734,7 +755,7 @@ def get_attendance_reminder_status(auth_user_id: str):
                 message="No reminder due.", data={"reminder_due": False}
             )
 
-        today = date.today()
+        today = _today_in_company_tz()
 
         # Sunday is the one day get_team_attendance_report() etc. treat as
         # a fixed weekly off company-wide; Saturday is handled inside
@@ -839,156 +860,6 @@ def get_attendance_reminder_status(auth_user_id: str):
         )
 
 
-# =========================
-# CHECKOUT REMINDER
-# =========================
-#
-# Same "have I forgotten to..." self-service check as
-# get_attendance_reminder_status() above, mirrored for the other end of
-# the day: an employee who checked in but never checked out. Polled by
-# Header.jsx (see the reminder-check poll) alongside the check-in
-# reminder, every few minutes while the employee is logged in -- there's
-# still no background scheduler in this backend, so nothing else could
-# fire this at shift-end time.
-#
-# Gated by its own "Checkout reminders" toggle (checkout_reminders on
-# notification_preferences, added alongside attendance_reminders --
-# deliberately a separate column/toggle rather than reusing
-# attendance_reminders, since an employee may want to be nudged about a
-# missed check-in but not a missed check-out, or vice versa). Read
-# directly from the table the same way attendance_reminders is above,
-# for the same reason noted there (avoids a cross-module import into
-# notification_preferences).
-#
-# Silently no-ops (reminder_due: False) whenever: the "Checkout
-# reminders" preference is off (or never set -- defaults to off),
-# there's no resolved shift for today, the employee never checked in
-# today, they've already checked out, the shift (+ grace) hasn't ended
-# yet, or a reminder already went out today. Never raises.
-
-
-def get_checkout_reminder_status(auth_user_id: str):
-    try:
-        employee_id = get_employee_id_for_auth_user(auth_user_id)
-        if not employee_id:
-            return success_response(
-                message="No reminder due.", data={"reminder_due": False}
-            )
-
-        pref = (
-            supabase_admin.table("notification_preferences")
-            .select("checkout_reminders")
-            .eq("employee_id", employee_id)
-            .maybe_single()
-            .execute()
-        )
-        # No row yet -- matches notification_preferences DEFAULTS
-        # (checkout_reminders: False) until the employee opts in via
-        # Settings -> Notifications -> Save preferences.
-        if not pref or not pref.data or not pref.data.get("checkout_reminders"):
-            return success_response(
-                message="No reminder due.", data={"reminder_due": False}
-            )
-
-        today = date.today()
-
-        attendance = (
-            supabase_admin.table("attendance")
-            .select("id, check_in_time, check_out_time")
-            .eq("employee_id", employee_id)
-            .eq("attendance_date", today.isoformat())
-            .maybe_single()
-            .execute()
-        )
-        # Never checked in today (or no row yet) -- nothing to remind
-        # them to check out of.
-        if (
-            not attendance
-            or not attendance.data
-            or not attendance.data.get("check_in_time")
-        ):
-            return success_response(
-                message="No reminder due.", data={"reminder_due": False}
-            )
-        # Already checked out -- done for the day.
-        if attendance.data.get("check_out_time"):
-            return success_response(
-                message="No reminder due.", data={"reminder_due": False}
-            )
-
-        rule = _get_attendance_rule()
-        shift = _get_employee_shift(employee_id, today)
-        if not shift or not shift.get("end_time"):
-            return success_response(
-                message="No reminder due.", data={"reminder_due": False}
-            )
-
-        hh, mm, *_ = str(shift["end_time"]).split(":")
-        company_tz = _get_company_timezone()
-        scheduled_end_local = datetime.combine(
-            today, time(int(hh), int(mm)), tzinfo=company_tz
-        )
-        # Overnight shifts (end_time earlier than start_time) roll to the
-        # next day -- same convention used by the site-visit compliance
-        # check above, otherwise this would fire hours too early.
-        if shift.get("start_time") and str(shift["end_time"]) < str(
-            shift["start_time"]
-        ):
-            scheduled_end_local += timedelta(days=1)
-        scheduled_end = scheduled_end_local.astimezone(timezone.utc).replace(
-            tzinfo=None
-        )
-
-        grace = shift.get("grace_period")
-        if grace is None:
-            grace = rule.get("late_grace_minutes", 0)
-
-        if _now_utc() < scheduled_end + timedelta(minutes=grace):
-            return success_response(
-                message="No reminder due.", data={"reminder_due": False}
-            )
-
-        day_start = datetime.combine(today, time(0, 0)).isoformat()
-        already_reminded = (
-            supabase_admin.table("notifications")
-            .select("id")
-            .eq("user_id", employee_id)
-            .eq("notification_type", "CHECKOUT_REMINDER")
-            .gte("created_at", day_start)
-            .limit(1)
-            .execute()
-        )
-        if already_reminded and already_reminded.data:
-            return success_response(
-                message="No reminder due.", data={"reminder_due": False}
-            )
-
-        shift_end_label = scheduled_end_local.strftime("%I:%M %p").lstrip("0")
-
-        notify_employee(
-            employee_id,
-            title="Checkout reminder",
-            message=(
-                f"You haven't checked out yet — your shift ended at "
-                f"{shift_end_label}."
-            ),
-            notification_type="CHECKOUT_REMINDER",
-        )
-
-        return success_response(
-            message="Reminder sent.",
-            data={"reminder_due": True, "shift_end": shift_end_label},
-        )
-
-    except Exception as e:
-        # Best-effort background check -- never let this bubble up as a
-        # 500 to a page that's just polling.
-        logger.error(f"Checkout reminder check failed for {auth_user_id}: {e}")
-        return success_response(
-            message="No reminder due.", data={"reminder_due": False}
-        )
-
-
 # ==========================================================================
 # BREAKS (multiple breaks per day)
 # ==========================================================================
@@ -1001,7 +872,7 @@ def start_break(auth_user_id: str, request: Optional[Request] = None):
         if not employee_id:
             forbidden("No employee profile is linked to this account.")
 
-        today = date.today()
+        today = _today_in_company_tz()
         attendance = attendance_repo.find_one(
             {"employee_id": employee_id, "attendance_date": today.isoformat()}
         )
@@ -1070,7 +941,7 @@ def end_break(auth_user_id: str, request: Optional[Request] = None):
         if not employee_id:
             forbidden("No employee profile is linked to this account.")
 
-        today = date.today()
+        today = _today_in_company_tz()
         attendance = attendance_repo.find_one(
             {"employee_id": employee_id, "attendance_date": today.isoformat()}
         )
@@ -1157,7 +1028,7 @@ SITE_VISIT_SELECT = "*, locations(id, location_name, location_code, address)"
 
 
 def _get_open_attendance_or_400(employee_id: str) -> dict:
-    today = date.today()
+    today = _today_in_company_tz()
     attendance = attendance_repo.find_one(
         {"employee_id": employee_id, "attendance_date": today.isoformat()}
     )
@@ -1534,7 +1405,7 @@ def get_my_outdoor_visits_today(auth_user_id: str):
         if not employee_id:
             return success_response(message="No employee profile linked.", data=[])
 
-        today = date.today()
+        today = _today_in_company_tz()
         attendance = attendance_repo.find_one(
             {"employee_id": employee_id, "attendance_date": today.isoformat()}
         )
@@ -1730,7 +1601,7 @@ def get_site_visit_compliance_status(auth_user_id: str):
                 message="No compliance check due.", data={"missed_site_ids": []}
             )
 
-        today = date.today()
+        today = _today_in_company_tz()
 
         assignments = (
             supabase_admin.table("employee_site_assignments")
@@ -1965,7 +1836,7 @@ def get_my_site_visits_today(auth_user_id: str):
         if not employee_id:
             forbidden("No employee profile is linked to this account.")
 
-        today = date.today()
+        today = _today_in_company_tz()
         attendance = attendance_repo.find_one(
             {"employee_id": employee_id, "attendance_date": today.isoformat()}
         )
@@ -2027,7 +1898,7 @@ def get_team_site_visits_today(auth_user_id: str):
                 message="Team site visits fetched successfully.", data=[]
             )
 
-        today = date.today()
+        today = _today_in_company_tz()
 
         attendance_rows = (
             supabase_admin.table("attendance")
@@ -2155,7 +2026,7 @@ def get_org_site_visits_today(auth_user_id: str):
                 message="Live site tracking fetched successfully.", data=[]
             )
 
-        today = date.today()
+        today = _today_in_company_tz()
 
         attendance_rows = (
             supabase_admin.table("attendance")
@@ -2300,7 +2171,7 @@ def get_org_site_visits_history(
                 message="Site visit history fetched successfully.", data=[]
             )
 
-        to_day = to_date or (date.today() - timedelta(days=1))
+        to_day = to_date or (_today_in_company_tz() - timedelta(days=1))
         from_day = from_date or (to_day - timedelta(days=29))
 
         attendance_rows = (
@@ -2392,7 +2263,7 @@ def get_employee_site_visits_history(
                     "You don't have permission to view this employee's site visits."
                 )
 
-        to_day = to_date or date.today()
+        to_day = to_date or _today_in_company_tz()
         from_day = from_date or to_day
 
         attendance_rows = (
@@ -2517,7 +2388,7 @@ def get_my_attendance(
                 for d in _daterange(start, end):
                     leave_dates.add(d)
 
-            today = date.today()
+            today = _today_in_company_tz()
             last_synth_day = min(to_date, today)
 
             for d in _daterange(from_date, last_synth_day):
@@ -2802,7 +2673,7 @@ def get_team_attendance(auth_user_id: str, target_date: Optional[date] = None):
                 message="Team attendance fetched successfully.", data=[]
             )
 
-        day = target_date or date.today()
+        day = target_date or _today_in_company_tz()
 
         response = (
             supabase_admin.table("attendance")
