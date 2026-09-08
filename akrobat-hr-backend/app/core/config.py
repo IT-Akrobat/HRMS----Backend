@@ -135,39 +135,15 @@ ONEMAP_EMAIL = os.getenv("ONEMAP_EMAIL")
 ONEMAP_PASSWORD = os.getenv("ONEMAP_PASSWORD")
 
 # ---------------------------------------------------------------------
-# Mappls (MapmyIndia) reverse geocoding (see app/locations/mappls_service.py)
+# Mappls (MapmyIndia) — see app/locations/mappls_service.py
 # ---------------------------------------------------------------------
-# India's own mapping platform — used instead of OpenStreetMap/Nominatim
-# for coordinates inside India, the same way OneMap is used instead of
-# Nominatim for Singapore above. Nominatim's crowd-sourced OSM data is
-# reliably strong for Singapore but noticeably weaker for India outside
-# a handful of well-mapped cities (missing/incorrect building names,
-# sparse address tags), which is why check-in locations were resolving
-# fine in Singapore but poorly in India.
-#
-# Free account + REST API key at https://www.mappls.com/api/. Unlike
-# OneMap this is a single static key on every request — no login/token
-# flow. Same degrade-gracefully pattern as PEXELS_API_KEY/ONEMAP_EMAIL
-# above: if unset, reverse-geocode requests for Indian coordinates just
-# fall back to OpenStreetMap on the frontend instead of the app failing
-# to start.
-MAPPLS_API_KEY = os.getenv("MAPPLS_API_KEY")
-
-# ---------------------------------------------------------------------
-# Google Geocoding API (see app/locations/google_geocode_service.py)
-# ---------------------------------------------------------------------
-# Get an API key at https://console.cloud.google.com/ (APIs & Services ->
-# Credentials, after enabling billing + the Geocoding API on the
-# project). Optional, same degrade-gracefully pattern as the others
-# above: if unset, reverse-geocode requests just fall back to
-# OpenStreetMap/Nominatim on the frontend instead of the app failing to
-# start.
-#
-# Explicitly used ONLY within Google's free monthly tier -- see
-# GOOGLE_INDIA_FREE_CAP / GOOGLE_GLOBAL_FREE_CAP in
-# google_geocode_service.py and sql/033_add_geocode_usage_tracking.sql
-# for the hard usage cap that enforces this.
-GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
+# Free account + OAuth client_id/client_secret at
+# https://about.mappls.com/api/. Optional and read with os.getenv (not
+# get_env()) — same degrade-gracefully pattern as OneMap above: if
+# unset, reverse-geocode requests for India coordinates just fall back
+# to OpenStreetMap on the frontend instead of the app failing to start.
+MAPPLS_CLIENT_ID = os.getenv("MAPPLS_CLIENT_ID")
+MAPPLS_CLIENT_SECRET = os.getenv("MAPPLS_CLIENT_SECRET")
 
 
 # ---------------------------------------------------------------------
