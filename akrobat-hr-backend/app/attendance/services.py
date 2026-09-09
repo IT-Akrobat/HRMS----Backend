@@ -495,6 +495,14 @@ def check_in(auth_user_id: str, data, request: Optional[Request] = None):
             "status": "Present",
             "check_in_latitude": data.latitude,
             "check_in_longitude": data.longitude,
+            # Resolved address string as shown to the employee at
+            # check-in time (see CheckInRequest.address) -- persisted so
+            # later viewers (audit logs, reports) never have to
+            # re-geocode the raw coordinates themselves. May be None if
+            # the client's reverse-geocode hadn't resolved yet or failed
+            # -- that's fine, it just means no address to show later,
+            # same as before this change existed.
+            "check_in_address": getattr(data, "address", None),
         }
 
         if request is not None:
@@ -675,6 +683,10 @@ def check_out(auth_user_id: str, data, request: Optional[Request] = None):
                 "status": status,
                 "check_out_latitude": data.latitude,
                 "check_out_longitude": data.longitude,
+                # See CheckOutRequest.address / check_in's equivalent
+                # comment above -- persist the already-resolved address
+                # string so later viewers don't have to re-geocode.
+                "check_out_address": getattr(data, "address", None),
             },
         )
 

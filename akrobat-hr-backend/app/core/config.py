@@ -145,6 +145,17 @@ ONEMAP_PASSWORD = os.getenv("ONEMAP_PASSWORD")
 MAPPLS_CLIENT_ID = os.getenv("MAPPLS_CLIENT_ID")
 MAPPLS_CLIENT_SECRET = os.getenv("MAPPLS_CLIENT_SECRET")
 
+# Static key from a Mappls "Cloud App" (Credentials tab -> Static Key).
+# Simpler than the OAuth pair above -- no token exchange, embedded
+# directly in the request URL. See app/locations/mappls_service.py.
+MAPPLS_REST_KEY = os.getenv("MAPPLS_REST_KEY")
+
+# Google Geocoding API -- see app/locations/google_geocode_service.py.
+# A single API key (not OAuth) from console.cloud.google.com -> APIs &
+# Services -> Credentials, with the "Geocoding API" enabled on that
+# project. Leave blank to skip Google entirely.
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
+
 
 # ---------------------------------------------------------------------
 # Web Push (see app/core/push.py, app/push_subscriptions)

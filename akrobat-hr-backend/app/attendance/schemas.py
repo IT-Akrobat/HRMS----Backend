@@ -12,6 +12,16 @@ class CheckInRequest(BaseModel):
 
     location_id: Optional[str] = None
 
+    # Already-resolved "Building, Area, City, State" string from the
+    # client's own reverseGeocode() call (src/utils/Geocode.jsx) at the
+    # moment of check-in -- i.e. exactly what the employee saw on screen.
+    # Stored as-is (check_in_address) so every later viewer (audit logs,
+    # reports) shows that same value instead of re-geocoding the raw
+    # lat/lon independently, which can land on a different/worse result.
+    # Best-effort: reverse geocoding can still be resolving or may have
+    # failed client-side, so this is optional and never blocks check-in.
+    address: Optional[str] = None
+
 
 class CheckOutRequest(BaseModel):
 
@@ -20,6 +30,9 @@ class CheckOutRequest(BaseModel):
     longitude: Optional[float] = None
 
     location_id: Optional[str] = None
+
+    # Same as CheckInRequest.address, but for check-out.
+    address: Optional[str] = None
 
 
 class RegularizationRequest(BaseModel):
