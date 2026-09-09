@@ -668,9 +668,21 @@ def check_out(auth_user_id: str, data, request: Optional[Request] = None):
 
         early_checkout_minutes = max(0, minimum_work_minutes - working_minutes)
         overtime_minutes = max(0, working_minutes - overtime_after_minutes)
-        status = (
-            "Half Day" if working_minutes < (minimum_work_minutes / 2) else "Present"
-        )
+        half_day_threshold_minutes = minimum_work_minutes / 2
+        if working_minutes >= minimum_work_minutes:
+            status = "Present"
+        elif working_minutes >= half_day_threshold_minutes:
+            # Worked at least half the shift (e.g. 4+ of 8 hours) but not
+            # the full thing — this is the only band that counts as Half
+            # Day.
+            status = "Half Day"
+        else:
+            # Checked out before reaching the half-day mark (including a
+            # near-immediate checkout). Distinct from "Absent" — the
+            # employee did show up and check in, they just left early —
+            # so it gets its own tag rather than being lumped in with
+            # employees who never checked in at all.
+            status = "Early Checkout"
 
         updated = attendance_repo.update(
             existing["id"],
@@ -3015,6 +3027,12 @@ def get_team_attendance_report(auth_user_id: str, from_date: date, to_date: date
                 if record:
                     if record.get("status") == "Half Day":
                         summary["half_days"] += 1
+                    elif record.get("status") == "Early Checkout":
+                        # Checked in but left before the half-day mark —
+                        # counts toward absent_days rather than
+                        # present_days, since they didn't put in enough
+                        # time to count as attended.
+                        summary["absent_days"] += 1
                     else:
                         summary["present_days"] += 1
                     if (record.get("late_minutes") or 0) > 0:
@@ -3176,12 +3194,14 @@ def get_org_attendance_report(
                 day_status = None
 
                 if record:
-                    day_status = (
-                        "Half Day" if record.get("status") == "Half Day" else "Present"
-                    )
-                    if day_status == "Half Day":
+                    if record.get("status") == "Half Day":
+                        day_status = "Half Day"
                         summary["half_days"] += 1
+                    elif record.get("status") == "Early Checkout":
+                        day_status = "Early Checkout"
+                        summary["absent_days"] += 1
                     else:
+                        day_status = "Present"
                         summary["present_days"] += 1
                     if (record.get("late_minutes") or 0) > 0:
                         summary["late_days"] += 1
