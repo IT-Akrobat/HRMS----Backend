@@ -16,9 +16,15 @@ from app.announcements.services import (
 
 from app.core.security import get_current_user
 from app.core.helpers.employee_helper import get_employee_id_for_auth_user
+from app.core.permissions import get_role_name_for_auth_user
 from app.core.exceptions import not_found
 
 router = APIRouter(prefix="/announcements", tags=["Announcements"])
+
+# Only Super Admin gets the full, unfiltered announcement history (see
+# ANNOUNCEMENT_GRACE_PERIOD_DAYS in services.py) — every other role's
+# list drops an announcement once it's past its grace period.
+SUPER_ADMIN_ROLE = "SUPER ADMIN"
 
 
 # =========================
@@ -49,7 +55,10 @@ def create(data: CreateAnnouncementRequest, user=Depends(get_current_user)):
 @router.get("/")
 def all_announcements(user=Depends(get_current_user)):
 
-    return get_announcements()
+    role_name = get_role_name_for_auth_user(user.id)
+    is_super_admin = role_name == SUPER_ADMIN_ROLE
+
+    return get_announcements(is_super_admin=is_super_admin)
 
 
 # =========================

@@ -115,18 +115,33 @@ def create_announcement(data, user_id: str):
 # GET ALL ANNOUNCEMENTS
 # =========================
 
+# An announcement stays visible to everyone while it's current, plus a
+# short grace period after its end_date passes -- so it doesn't vanish
+# the instant it expires. Super Admin (the only role that can create/
+# edit/delete announcements -- see app/announcements/routes.py) is
+# exempt from this and always sees the full history via
+# is_super_admin=True, since they need it for management/audit
+# purposes even after it's dropped off every other role's dashboard.
+ANNOUNCEMENT_GRACE_PERIOD_DAYS = 2
 
-def get_announcements():
+
+def get_announcements(is_super_admin: bool = False):
 
     try:
 
-        response = supabase_admin.table("announcements").select("""
+        query = supabase_admin.table("announcements").select("""
             *,
             employees(
                 full_name,
                 employee_id
             )
-            """).order("created_at", desc=True).execute()
+            """)
+
+        if not is_super_admin:
+            cutoff = str(date.today() - timedelta(days=ANNOUNCEMENT_GRACE_PERIOD_DAYS))
+            query = query.gte("end_date", cutoff)
+
+        response = query.order("created_at", desc=True).execute()
 
         return success_response(
             "Announcements fetched successfully",
@@ -149,13 +164,12 @@ def get_active_announcements():
 
         today = date.today()
 
-        # "Active" here means still current OR ended within the last week —
-        # Employee/Manager/HR (the only callers of this endpoint; Super
-        # Admin uses GET /announcements/ instead, see routes.py) should
-        # keep seeing an announcement for a 7-day grace period after its
-        # end_date before it drops off their dashboard, instead of it
-        # disappearing the instant end_date passes.
-        cutoff = str(today - timedelta(days=7))
+        # "Active" here means still current OR ended within the grace
+        # period — same ANNOUNCEMENT_GRACE_PERIOD_DAYS rule as
+        # get_announcements() above, kept in sync so both endpoints
+        # agree on when an announcement disappears for non-Super-Admin
+        # roles.
+        cutoff = str(today - timedelta(days=ANNOUNCEMENT_GRACE_PERIOD_DAYS))
         today_str = str(today)
 
         response = (
