@@ -104,3 +104,152 @@ alter table attendance
 --     return new_count; -- NULL if the WHERE clause blocked the update
 -- end;
 -- $$ language plpgsql;
+
+-- ---------------------------------------------------------------------
+-- 034: IT Department + Full Stack Developer designation
+-- ---------------------------------------------------------------------
+-- Uses WHERE NOT EXISTS instead of ON CONFLICT so this doesn't depend
+-- on department_name / designation_name / (leave_type_id, tier_name)
+-- actually having a unique constraint in this database -- safe to
+-- re-run either way.
+
+-- 1. Department: IT
+insert into departments (department_name, department_code)
+select 'IT', 'IT'
+where not exists (
+    select 1 from departments where department_name = 'IT'
+);
+
+-- 2. Designation: Full Stack Developer, under the IT department
+insert into designations (designation_name, department_id)
+select 'Full Stack Developer', d.id
+from departments d
+where d.department_name = 'IT'
+and not exists (
+    select 1 from designations where designation_name = 'Full Stack Developer'
+);
+
+-- 3. Annual Leave "12 DAYS" tier (same as sql/033_*.sql -- repeated
+--    here, safe to re-run, so this script alone is enough if 033
+--    hasn't been applied yet). This is what gives the 12/12/12
+--    Chennai leave policy its Annual Leave number; Sick/Casual = 12
+--    comes from the "Chennai Leave Default" checkbox on the
+--    Create/Edit User form.
+insert into leave_policy_tiers (leave_type_id, tier_name, days)
+select lt.id, '12 DAYS', 12
+from leave_types lt
+where lt.leave_name = 'ANNUAL LEAVE'
+and not exists (
+    select 1 from leave_policy_tiers
+    where leave_type_id = lt.id and tier_name = '12 DAYS'
+);
+
+
+-- ---------------------------------------------------------------------
+-- 033: Alternate Saturday schedule + Chennai Leave Default
+-- ---------------------------------------------------------------------
+-- Purely additive. Nothing here changes behaviour for existing
+-- employees: alternate_saturday defaults to false (identical to today's
+-- works_saturday Yes/No behaviour), and employee_leave_overrides only
+-- affects an employee once a row exists for them.
+
+-- 1. Alternate Saturday (works only the 1st & 3rd Saturday of the
+--    month) -- a second, independent flag alongside works_saturday so
+--    the existing Yes/No toggle and its logic are untouched. Only
+--    meaningful when works_saturday = true; see
+--    app/attendance/services.py _get_employee_shift.
+alter table employees
+    add column if not exists alternate_saturday boolean not null default false;
+
+
+-- 2. Per-employee leave day overrides ("Chennai Leave Default": 12
+--    Sick / 12 Casual). Used only for 'fixed' entitlement_mode leave
+--    types (Sick Leave, Casual Leave). An employee with no row here
+--    behaves exactly as before -- gets leave_types.default_days like
+--    everyone else. See app/leaves/policy_services.py
+--    _resolve_days_for_employee / get_my_leave_entitlements.
+create table if not exists employee_leave_overrides (
+    id uuid primary key default uuid_generate_v4(),
+    employee_id uuid not null references employees(id) on delete cascade,
+    leave_type_id uuid not null references leave_types(id) on delete cascade,
+    days integer not null,
+    created_at timestamp default now(),
+    updated_at timestamp default now(),
+    unique (employee_id, leave_type_id)
+);
+
+create index if not exists idx_employee_leave_overrides_employee
+    on employee_leave_overrides(employee_id);
+
+
+-- 3. Annual Leave "12 DAYS" tier -- fits into the existing tiered
+--    Annual Leave mechanism (21/20/14/11/10) alongside it. HR picks
+--    this from the same Annual Leave tier dropdown already on the
+--    Create/Edit User form for Chennai employees; every other
+--    department/location keeps using whichever tier they're on today.
+--    WHERE NOT EXISTS instead of ON CONFLICT: doesn't depend on
+--    (leave_type_id, tier_name) actually having a unique constraint in
+--    this database -- safe to re-run either way.
+insert into leave_policy_tiers (leave_type_id, tier_name, days)
+select lt.id, '12 DAYS', 12
+from leave_types lt
+where lt.leave_name = 'ANNUAL LEAVE'
+and not exists (
+    select 1 from leave_policy_tiers
+    where leave_type_id = lt.id and tier_name = '12 DAYS'
+);
+
+
+-- -- ---------------------------------------------------------------------
+-- -- 033: Alternate Saturday schedule + Chennai Leave Default
+-- -- ---------------------------------------------------------------------
+-- -- Purely additive. Nothing here changes behaviour for existing
+-- -- employees: alternate_saturday defaults to false (identical to today's
+-- -- works_saturday Yes/No behaviour), and employee_leave_overrides only
+-- -- affects an employee once a row exists for them.
+
+-- -- 1. Alternate Saturday (works only the 1st & 3rd Saturday of the
+-- --    month) -- a second, independent flag alongside works_saturday so
+-- --    the existing Yes/No toggle and its logic are untouched. Only
+-- --    meaningful when works_saturday = true; see
+-- --    app/attendance/services.py _get_employee_shift.
+-- alter table employees
+--     add column if not exists alternate_saturday boolean not null default false;
+
+
+-- -- 2. Per-employee leave day overrides ("Chennai Leave Default": 12
+-- --    Sick / 12 Casual). Used only for 'fixed' entitlement_mode leave
+-- --    types (Sick Leave, Casual Leave). An employee with no row here
+-- --    behaves exactly as before -- gets leave_types.default_days like
+-- --    everyone else. See app/leaves/policy_services.py
+-- --    _resolve_days_for_employee / get_my_leave_entitlements.
+-- create table if not exists employee_leave_overrides (
+--     id uuid primary key default uuid_generate_v4(),
+--     employee_id uuid not null references employees(id) on delete cascade,
+--     leave_type_id uuid not null references leave_types(id) on delete cascade,
+--     days integer not null,
+--     created_at timestamp default now(),
+--     updated_at timestamp default now(),
+--     unique (employee_id, leave_type_id)
+-- );
+
+-- create index if not exists idx_employee_leave_overrides_employee
+--     on employee_leave_overrides(employee_id);
+
+
+-- -- 3. Annual Leave "12 DAYS" tier -- fits into the existing tiered
+-- --    Annual Leave mechanism (21/20/14/11/10) alongside it. HR picks
+-- --    this from the same Annual Leave tier dropdown already on the
+-- --    Create/Edit User form for Chennai employees; every other
+-- --    department/location keeps using whichever tier they're on today.
+-- --    WHERE NOT EXISTS instead of ON CONFLICT: doesn't depend on
+-- --    (leave_type_id, tier_name) actually having a unique constraint in
+-- --    this database -- safe to re-run either way.
+-- insert into leave_policy_tiers (leave_type_id, tier_name, days)
+-- select lt.id, '12 DAYS', 12
+-- from leave_types lt
+-- where lt.leave_name = 'ANNUAL LEAVE'
+-- and not exists (
+--     select 1 from leave_policy_tiers
+--     where leave_type_id = lt.id and tier_name = '12 DAYS'
+-- );
