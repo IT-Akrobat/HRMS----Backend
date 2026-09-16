@@ -253,3 +253,28 @@ and not exists (
 --     select 1 from leave_policy_tiers
 --     where leave_type_id = lt.id and tier_name = '12 DAYS'
 -- );
+
+
+-- =====================================================================
+-- Akrobat HRMS — Site Visit "forgot to check out" flag
+-- =====================================================================
+-- Site visits can be closed two ways:
+--   1. Employee explicitly taps "Departed Site" (depart_site), or arrives
+--      at a new site which implicitly closes the previous one
+--      (arrive_at_site) -- both are a real, deliberate action.
+--   2. Employee checks out for the DAY (check_out) while a site visit is
+--      still open -- this was already being auto-closed as a safety net
+--      so it doesn't stay open forever, but with nothing recorded to say
+--      it happened automatically vs. the employee actually departing.
+--
+-- This adds a flag + reason so the UI/reports can show "on progress"
+-- visits that were auto-closed with a "forgot to check out" note,
+-- without touching that note for visits the employee genuinely departed
+-- from themselves.
+-- =====================================================================
+ 
+alter table attendance_site_visits
+    add column if not exists auto_closed boolean not null default false;
+ 
+alter table attendance_site_visits
+    add column if not exists auto_close_reason text;

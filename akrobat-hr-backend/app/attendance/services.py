@@ -682,9 +682,22 @@ def check_out(auth_user_id: str, data, request: Optional[Request] = None):
 
         # Safety net: if a field-staff employee forgot to log "Departed
         # Site" for the last location, close it out now rather than
-        # leaving it open forever.
-        _close_open_site_visit(
-            existing["id"], check_out_time, data.latitude, data.longitude
+        # leaving it open forever — flagged as auto-closed so the UI can
+        # show "forgot to check out" instead of it looking like a real
+        # departure. Not set when the employee actually taps "Departed
+        # Site" themselves (see depart_site) or moves to a new site
+        # (see arrive_at_site) — those are deliberate actions, not a
+        # forgotten checkout.
+        auto_closed_visit = _close_open_site_visit(
+            existing["id"],
+            check_out_time,
+            data.latitude,
+            data.longitude,
+            auto_closed=True,
+            auto_close_reason=(
+                'Checked out for the day without logging "Departed Site" '
+                "— this site visit was closed automatically."
+            ),
         )
 
         shift = _get_employee_shift(employee_id, today)
@@ -739,7 +752,12 @@ def check_out(auth_user_id: str, data, request: Optional[Request] = None):
             target_employee_id=employee_id,
             record_id=existing["id"],
             description=f"Checked out — {_format_duration_minutes(working_minutes)} worked, status: {status}"
-            + (f" — at {location_name}" if location_name else ""),
+            + (f" — at {location_name}" if location_name else "")
+            + (
+                " (a site visit was still open and got auto-closed — forgot to check out)"
+                if auto_closed_visit
+                else ""
+            ),
             old_values=existing,
             new_values=updated,
             request=request,
@@ -1275,13 +1293,24 @@ def _get_open_attendance_or_400(employee_id: str) -> dict:
 
 
 def _close_open_site_visit(
-    attendance_id: str, at_time: datetime, latitude=None, longitude=None
+    attendance_id: str,
+    at_time: datetime,
+    latitude=None,
+    longitude=None,
+    auto_closed: bool = False,
+    auto_close_reason: Optional[str] = None,
 ):
     """
     Closes whichever site-visit row (if any) is still open for this
     attendance day — used both when arriving at the *next* site (leaving
     the previous one implicitly) and as a safety net on day check-out, so
     a forgotten "depart" never leaves a visit open forever.
+
+    auto_closed / auto_close_reason are only set when this close was NOT
+    a deliberate action by the employee (i.e. called from check_out as
+    the safety net below) — arrive_at_site's implicit close and
+    depart_site's explicit close both leave these as False/None, since
+    the employee did actually act in both of those cases.
     """
     open_visit = (
         supabase_admin.table("attendance_site_visits")
@@ -1300,17 +1329,20 @@ def _close_open_site_visit(
     arrival = datetime.fromisoformat(visit["arrival_time"])
     duration_minutes = max(0, int((at_time - arrival).total_seconds() / 60))
 
+    update_payload = {
+        "departure_time": at_time.isoformat(),
+        "duration_minutes": duration_minutes,
+        "departure_latitude": latitude,
+        "departure_longitude": longitude,
+        "updated_at": _now_utc().isoformat(),
+        "auto_closed": auto_closed,
+    }
+    if auto_closed:
+        update_payload["auto_close_reason"] = auto_close_reason
+
     updated = (
         supabase_admin.table("attendance_site_visits")
-        .update(
-            {
-                "departure_time": at_time.isoformat(),
-                "duration_minutes": duration_minutes,
-                "departure_latitude": latitude,
-                "departure_longitude": longitude,
-                "updated_at": _now_utc().isoformat(),
-            }
-        )
+        .update(update_payload)
         .eq("id", visit["id"])
         .execute()
     )
