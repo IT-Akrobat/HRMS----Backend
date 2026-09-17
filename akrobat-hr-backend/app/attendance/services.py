@@ -680,7 +680,25 @@ def _compute_checkout_fields(
     identically instead of admin_update_attendance() silently skipping
     the recompute (which used to leave working_minutes/status stale
     after an HR edit — see admin_update_attendance's docstring).
+
+    check_out_time is expected to already carry the correct calendar
+    date (rolled forward past check_in_time for an overnight shift) —
+    the frontend's combineDateAndTimeToServerISOString does this for an
+    HR edit, and a normal self-service check_out() always passes
+    "now", which is trivially after check_in_time. As a last line of
+    defense against a check_out_time that still lands on/before
+    check_in_time (e.g. a value written some other way — direct import,
+    a future API caller — without that rollover), treat it the same
+    way any shift-based time tracker would: a checkout clock-time
+    earlier than check-in means the *next* occurrence of that time, not
+    a negative shift. Without this, gross_minutes goes negative,
+    working_minutes gets clamped to 0, and the day is misreported as an
+    "Early Checkout" with 0m worked instead of the actual overnight
+    duration.
     """
+    if check_out_time <= check_in_time:
+        check_out_time = check_out_time + timedelta(days=1)
+
     gross_minutes = int((check_out_time - check_in_time).total_seconds() / 60)
     working_minutes = max(0, gross_minutes - (break_minutes or 0))
 
