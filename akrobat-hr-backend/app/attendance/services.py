@@ -645,6 +645,48 @@ def check_in(auth_user_id: str, data, request: Optional[Request] = None):
         internal_server_error("Unable to check in.")
 
 
+def _compute_checkout_fields(
+    employee_id: str,
+    attendance_date,
+    check_in_time: datetime,
+    check_out_time: datetime,
+    break_minutes: int,
+) -> dict:
+    """
+    Shared working_minutes / early_checkout_minutes / overtime_minutes /
+    status calculation, used both by a normal self-service check_out()
+    and by admin_update_attendance() when HR fixes a forgotten checkout.
+    Pulled out of check_out() so both call sites compute these fields
+    identically instead of admin_update_attendance() silently skipping
+    the recompute (which used to leave working_minutes/status stale
+    after an HR edit — see admin_update_attendance's docstring).
+    """
+    gross_minutes = int((check_out_time - check_in_time).total_seconds() / 60)
+    working_minutes = max(0, gross_minutes - (break_minutes or 0))
+
+    shift = _get_employee_shift(employee_id, attendance_date)
+    rule = _get_attendance_rule()
+    minimum_work_minutes = _minimum_work_minutes(shift, rule)
+    overtime_after_minutes = rule.get("overtime_after_minutes") or minimum_work_minutes
+
+    early_checkout_minutes = max(0, minimum_work_minutes - working_minutes)
+    overtime_minutes = max(0, working_minutes - overtime_after_minutes)
+    half_day_threshold_minutes = minimum_work_minutes / 2
+    if working_minutes >= minimum_work_minutes:
+        status = "Present"
+    elif working_minutes >= half_day_threshold_minutes:
+        status = "Half Day"
+    else:
+        status = "Early Checkout"
+
+    return {
+        "working_minutes": working_minutes,
+        "early_checkout_minutes": early_checkout_minutes,
+        "overtime_minutes": overtime_minutes,
+        "status": status,
+    }
+
+
 def check_out(auth_user_id: str, data, request: Optional[Request] = None):
     try:
         employee_id = get_employee_id_for_auth_user(auth_user_id)
@@ -677,33 +719,13 @@ def check_out(auth_user_id: str, data, request: Optional[Request] = None):
             (b.get("break_minutes") or 0) for b in (breaks_resp.data or [])
         )
 
-        gross_minutes = int((check_out_time - check_in_time).total_seconds() / 60)
-        working_minutes = max(0, gross_minutes - total_break_minutes)
-
-        shift = _get_employee_shift(employee_id, today)
-        rule = _get_attendance_rule()
-        minimum_work_minutes = _minimum_work_minutes(shift, rule)
-        overtime_after_minutes = (
-            rule.get("overtime_after_minutes") or minimum_work_minutes
+        computed = _compute_checkout_fields(
+            employee_id, today, check_in_time, check_out_time, total_break_minutes
         )
-
-        early_checkout_minutes = max(0, minimum_work_minutes - working_minutes)
-        overtime_minutes = max(0, working_minutes - overtime_after_minutes)
-        half_day_threshold_minutes = minimum_work_minutes / 2
-        if working_minutes >= minimum_work_minutes:
-            status = "Present"
-        elif working_minutes >= half_day_threshold_minutes:
-            # Worked at least half the shift (e.g. 4+ of 8 hours) but not
-            # the full thing — this is the only band that counts as Half
-            # Day.
-            status = "Half Day"
-        else:
-            # Checked out before reaching the half-day mark (including a
-            # near-immediate checkout). Distinct from "Absent" — the
-            # employee did show up and check in, they just left early —
-            # so it gets its own tag rather than being lumped in with
-            # employees who never checked in at all.
-            status = "Early Checkout"
+        working_minutes = computed["working_minutes"]
+        early_checkout_minutes = computed["early_checkout_minutes"]
+        overtime_minutes = computed["overtime_minutes"]
+        status = computed["status"]
 
         updated = attendance_repo.update(
             existing["id"],
@@ -1253,6 +1275,17 @@ SITE_VISIT_SELECT = "*, locations(id, location_name, location_code, address)"
 
 
 def _get_open_attendance_or_400(employee_id: str) -> dict:
+    """
+    Today's attendance row, required before any site-visit action.
+
+    Deliberately does NOT require the day to still be open (no
+    check_out_time yet) — field staff who check out for the day and then
+    head out to a site later that evening (or check in first thing, visit
+    a site, and only check out much later) still need to log arrival /
+    departure. The only real requirement is that they checked in at some
+    point today; whether they've since checked out is irrelevant to
+    whether a site visit can be logged against that same attendance day.
+    """
     today = _today_in_company_tz()
     attendance = attendance_repo.find_one(
         {"employee_id": employee_id, "attendance_date": today.isoformat()}
@@ -1261,31 +1294,35 @@ def _get_open_attendance_or_400(employee_id: str) -> dict:
     if not attendance:
         bad_request("You need to check in for the day before logging a site visit.")
 
-    if attendance.get("check_out_time"):
-        bad_request("You have already checked out today.")
-
     return attendance
 
 
 def _close_open_site_visit(
-    attendance_id: str,
+    employee_id: str,
     at_time: datetime,
     latitude=None,
     longitude=None,
 ):
     """
     Closes whichever site-visit row (if any) is still open for this
-    attendance day — used when arriving at the *next* site (leaving the
-    previous one implicitly) or when the employee explicitly taps
-    "Departed Site". Both are deliberate employee actions; there is no
-    automatic/day-checkout close anymore — a site visit left open when
-    the employee checks out for the day just stays open until they
-    depart it themselves.
+    EMPLOYEE — not scoped to "today's" attendance row. Used when
+    arriving at the *next* site (leaving the previous one implicitly) or
+    when the employee explicitly taps "Departed Site". Both are
+    deliberate employee actions; there is no automatic/day-checkout
+    close anymore.
+
+    Keyed by employee_id rather than attendance_id on purpose: a visit
+    that started before midnight (e.g. a night site visit) needs to
+    still be closeable after midnight rolls the calendar date over, at
+    which point "today's attendance row" no longer matches the row the
+    visit was opened against. attendance_site_visits carries its own
+    employee_id column precisely so this lookup never has to go through
+    a specific attendance_date at all.
     """
     open_visit = (
         supabase_admin.table("attendance_site_visits")
         .select("*")
-        .eq("attendance_id", attendance_id)
+        .eq("employee_id", employee_id)
         .is_("departure_time", "null")
         .order("arrival_time", desc=True)
         .limit(1)
@@ -1314,7 +1351,117 @@ def _close_open_site_visit(
         .execute()
     )
 
-    return updated.data[0] if updated.data else None
+    result = updated.data[0] if updated.data else None
+
+    # A visit that happened while the employee was still checked in is
+    # already inside check_in_time -> check_out_time, so it's already
+    # part of working_minutes once they check out (see the module
+    # docstring above). But a visit logged AFTER the employee has
+    # already checked out for the day — the classic "went home, then
+    # went back out for a night site visit" case — falls entirely
+    # outside that window and would otherwise vanish from the day's
+    # worked/overtime totals even though it's genuine work time. Credit
+    # whatever portion of [arrival, at_time] isn't already covered by
+    # the shift window onto the parent attendance row.
+    if result and visit.get("attendance_id"):
+        _credit_site_visit_outside_shift(
+            attendance_id=visit["attendance_id"],
+            employee_id=employee_id,
+            visit_arrival=arrival,
+            visit_departure=at_time,
+            visit_duration_minutes=duration_minutes,
+        )
+
+    return result
+
+
+def _credit_site_visit_outside_shift(
+    attendance_id: str,
+    employee_id: str,
+    visit_arrival: datetime,
+    visit_departure: datetime,
+    visit_duration_minutes: int,
+) -> None:
+    """
+    Adds the part of a just-closed site visit that falls outside the
+    parent attendance row's check_in_time -> check_out_time window onto
+    that row's working_minutes / overtime_minutes.
+
+    Only has anything to do once the day is already checked out —
+    while check_out_time is still null the visit is inside the still-
+    open shift and check_out() will naturally include it when the
+    employee eventually checks out, so crediting it here too would
+    double-count it. This only fires for time genuinely outside the
+    logged shift, night site visits after checkout being the main case.
+    """
+    try:
+        attendance = attendance_repo.get_by_id(attendance_id)
+    except Exception:
+        attendance = None
+
+    if not attendance or not attendance.get("check_out_time"):
+        return
+
+    check_out_time = datetime.fromisoformat(attendance["check_out_time"])
+    check_in_time = (
+        datetime.fromisoformat(attendance["check_in_time"])
+        if attendance.get("check_in_time")
+        else check_out_time
+    )
+
+    overlap_start = max(visit_arrival, check_in_time)
+    overlap_end = min(visit_departure, check_out_time)
+    overlap_minutes = (
+        max(0, int((overlap_end - overlap_start).total_seconds() / 60))
+        if overlap_end > overlap_start
+        else 0
+    )
+    extra_minutes = max(0, visit_duration_minutes - overlap_minutes)
+
+    if extra_minutes <= 0:
+        return
+
+    new_working_minutes = (attendance.get("working_minutes") or 0) + extra_minutes
+
+    attendance_date = date.fromisoformat(attendance["attendance_date"])
+    shift = _get_employee_shift(employee_id, attendance_date)
+    rule = _get_attendance_rule()
+    minimum_work_minutes = _minimum_work_minutes(shift, rule)
+    overtime_after_minutes = rule.get("overtime_after_minutes") or minimum_work_minutes
+    half_day_threshold_minutes = minimum_work_minutes / 2
+
+    new_overtime_minutes = max(0, new_working_minutes - overtime_after_minutes)
+
+    if new_working_minutes >= minimum_work_minutes:
+        new_status = "Present"
+    elif new_working_minutes >= half_day_threshold_minutes:
+        new_status = "Half Day"
+    else:
+        new_status = attendance.get("status")
+
+    attendance_repo.update(
+        attendance_id,
+        {
+            "working_minutes": new_working_minutes,
+            "overtime_minutes": new_overtime_minutes,
+            "status": new_status,
+        },
+    )
+
+    record_audit_log(
+        module="ATTENDANCE",
+        action="SITE_VISIT_CREDITED",
+        performed_by=employee_id,
+        target_employee_id=employee_id,
+        record_id=attendance_id,
+        description=(
+            f"Night/after-checkout site visit added "
+            f"{_format_duration_minutes(extra_minutes)} to working hours "
+            f"(now {_format_duration_minutes(new_working_minutes)} total)"
+        ),
+        old_values={"working_minutes": attendance.get("working_minutes")},
+        new_values={"working_minutes": new_working_minutes},
+    )
 
 
 def arrive_at_site(auth_user_id: str, data, request: Optional[Request] = None):
@@ -1339,10 +1486,11 @@ def arrive_at_site(auth_user_id: str, data, request: Optional[Request] = None):
 
         arrival_time = _now_utc()
 
-        # Leaving the previous site, if one is still open.
-        _close_open_site_visit(
-            attendance["id"], arrival_time, data.latitude, data.longitude
-        )
+        # Leaving the previous site, if one is still open — looked up by
+        # employee, not by today's attendance_id, so a visit opened before
+        # midnight still gets closed even if it's now technically "a
+        # different day" (see _close_open_site_visit's docstring).
+        _close_open_site_visit(employee_id, arrival_time, data.latitude, data.longitude)
 
         inserted = (
             supabase_admin.table("attendance_site_visits")
@@ -1407,10 +1555,13 @@ def depart_site(auth_user_id: str, data, request: Optional[Request] = None):
         if not employee_id:
             forbidden("No employee profile is linked to this account.")
 
-        attendance = _get_open_attendance_or_400(employee_id)
-
+        # No "today's attendance" lookup here on purpose — closing whatever
+        # visit is currently open for this employee works regardless of
+        # what calendar date it now is, which is what lets a night visit
+        # that crossed midnight still be departed from. See
+        # _close_open_site_visit's docstring.
         record = _close_open_site_visit(
-            attendance["id"], _now_utc(), data.latitude, data.longitude
+            employee_id, _now_utc(), data.latitude, data.longitude
         )
 
         if not record:
@@ -1426,7 +1577,7 @@ def depart_site(auth_user_id: str, data, request: Optional[Request] = None):
             action="SITE_VISIT_DEPART",
             performed_by=auth_user_id,
             target_employee_id=employee_id,
-            record_id=attendance["id"],
+            record_id=record.get("attendance_id"),
             description=(
                 f"Departed site — "
                 f"{_format_duration_minutes(record.get('duration_minutes'))} on site"
@@ -1492,7 +1643,7 @@ def arrive_at_outdoor_visit(auth_user_id: str, data, request: Optional[Request] 
 
         arrival_time = _now_utc()
 
-        _close_open_outdoor_visit(attendance["id"], arrival_time)
+        _close_open_outdoor_visit(employee_id, arrival_time)
 
         inserted = (
             supabase_admin.table("attendance_outdoor_visits")
@@ -1546,10 +1697,11 @@ def depart_outdoor_visit(auth_user_id: str, data, request: Optional[Request] = N
         if not employee_id:
             forbidden("No employee profile is linked to this account.")
 
-        attendance = _get_open_attendance_or_400(employee_id)
-
+        # No "today's attendance" lookup here — same reasoning as
+        # depart_site: closing whatever's open for this employee works
+        # regardless of what calendar date it now is.
         record = _close_open_outdoor_visit(
-            attendance["id"], _now_utc(), data.latitude, data.longitude
+            employee_id, _now_utc(), data.latitude, data.longitude
         )
 
         if not record:
@@ -1565,7 +1717,7 @@ def depart_outdoor_visit(auth_user_id: str, data, request: Optional[Request] = N
             action="OUTDOOR_VISIT_DEPART",
             performed_by=auth_user_id,
             target_employee_id=employee_id,
-            record_id=attendance["id"],
+            record_id=record.get("attendance_id"),
             description=(
                 f"Ended outdoor check-in — "
                 f"{_format_duration_minutes(record.get('duration_minutes'))}"
@@ -1593,12 +1745,17 @@ def depart_outdoor_visit(auth_user_id: str, data, request: Optional[Request] = N
 
 
 def _close_open_outdoor_visit(
-    attendance_id: str, at_time: datetime, latitude=None, longitude=None
+    employee_id: str, at_time: datetime, latitude=None, longitude=None
 ):
+    """
+    Same employee-scoped lookup as _close_open_site_visit, and for the
+    same reason — an outdoor check-in started before midnight needs to
+    still be closeable after the calendar date rolls over.
+    """
     open_visit = (
         supabase_admin.table("attendance_outdoor_visits")
         .select("*")
-        .eq("attendance_id", attendance_id)
+        .eq("employee_id", employee_id)
         .is_("departure_time", "null")
         .order("arrival_time", desc=True)
         .limit(1)
@@ -1800,14 +1957,112 @@ def ping_site_visit(auth_user_id: str, data, request: Optional[Request] = None):
 # ==========================================================================
 
 
+def _get_missed_site_assignments(employee_id: str, today: date) -> list[dict]:
+    """
+    Read-only core of the "did this employee miss an assigned site today?"
+    check, factored out so it can be reused by both:
+      - get_site_visit_compliance_status() below — the employee's own
+        self-check, which additionally sends the manager a notification
+        and writes an audit log the first time a site shows up here.
+      - get_team_site_visit_status_today() — the manager-facing view,
+        which just wants the current answer to render a persistent
+        "Not visited" badge, with no side effects (so it can be polled/
+        reloaded freely without re-triggering anything).
+
+    Looks at every active site assignment that covers `today`
+    (assigned_from <= today <= assigned_to, treating either bound as
+    open-ended when null). Returns [] if:
+      - nothing is assigned for today, or
+      - the employee's shift for today hasn't ended yet (+ grace period)
+        — flagging a "missed" visit mid-shift would be wrong, they still
+        have time to go.
+
+    Otherwise returns one dict per assigned site with no
+    attendance_site_visits row logged for it today:
+        {"assignment_id", "location_id", "location_name"}
+    """
+    today_iso = today.isoformat()
+
+    assignments = (
+        supabase_admin.table("employee_site_assignments")
+        .select("id, location_id, assigned_from, assigned_to, locations(location_name)")
+        .eq("employee_id", employee_id)
+        .eq("is_active", True)
+        .execute()
+    )
+
+    covering_today = [
+        a
+        for a in (assignments.data or [])
+        if (not a.get("assigned_from") or a["assigned_from"] <= today_iso)
+        and (not a.get("assigned_to") or a["assigned_to"] >= today_iso)
+    ]
+
+    if not covering_today:
+        return []
+
+    # Same shift resolution + grace period the attendance reminder uses.
+    rule = _get_attendance_rule()
+    shift = _get_employee_shift(employee_id, today)
+    if not shift or not shift.get("end_time"):
+        return []
+
+    hh, mm, *_ = str(shift["end_time"]).split(":")
+    company_tz = _get_company_timezone()
+    scheduled_end_local = datetime.combine(
+        today, time(int(hh), int(mm)), tzinfo=company_tz
+    )
+    # Overnight shifts (end_time earlier than start_time) roll to the next
+    # day, same convention used elsewhere for shift math — otherwise this
+    # would fire hours too early for them.
+    if shift.get("start_time") and str(shift["end_time"]) < str(shift["start_time"]):
+        scheduled_end_local += timedelta(days=1)
+    scheduled_end = scheduled_end_local.astimezone(timezone.utc).replace(tzinfo=None)
+
+    grace = shift.get("grace_period")
+    if grace is None:
+        grace = rule.get("late_grace_minutes", 0)
+
+    if _now_utc() < scheduled_end + timedelta(minutes=grace):
+        return []
+
+    day_start = datetime.combine(today, time(0, 0)).isoformat()
+    missed = []
+
+    for assignment in covering_today:
+        location_id = assignment.get("location_id")
+        site_name = (assignment.get("locations") or {}).get(
+            "location_name", "the assigned site"
+        )
+
+        visited = (
+            supabase_admin.table("attendance_site_visits")
+            .select("id")
+            .eq("employee_id", employee_id)
+            .eq("location_id", location_id)
+            .gte("arrival_time", day_start)
+            .limit(1)
+            .execute()
+        )
+        if visited and visited.data:
+            continue
+
+        missed.append(
+            {
+                "assignment_id": assignment.get("id"),
+                "location_id": location_id,
+                "location_name": site_name,
+            }
+        )
+
+    return missed
+
+
 def get_site_visit_compliance_status(auth_user_id: str):
     """
-    For the CURRENT employee: looks at every active site assignment that
-    covers today (assigned_from <= today <= assigned_to, treating either
-    bound as open-ended when null). Once that employee's shift has ended
-    for the day (same shift-resolution rules as the attendance reminder —
-    _get_employee_shift, IST-aware) and no attendance_site_visits row
-    exists for that site today, the assignment counts as "missed":
+    For the CURRENT employee: uses _get_missed_site_assignments() to find
+    any assigned site with no visit logged today (once their shift for
+    the day is over). For each one found:
 
       - the employee's manager (+ every SUPER ADMIN) gets a one-time
         "Site visit missed" notification, deduped per manager/site/day the
@@ -1834,61 +2089,9 @@ def get_site_visit_compliance_status(auth_user_id: str):
 
         today = _today_in_company_tz()
 
-        assignments = (
-            supabase_admin.table("employee_site_assignments")
-            .select(
-                "id, location_id, assigned_from, assigned_to, locations(location_name)"
-            )
-            .eq("employee_id", employee_id)
-            .eq("is_active", True)
-            .execute()
-        )
+        missed_assignments = _get_missed_site_assignments(employee_id, today)
 
-        today_iso = today.isoformat()
-        covering_today = [
-            a
-            for a in (assignments.data or [])
-            if (not a.get("assigned_from") or a["assigned_from"] <= today_iso)
-            and (not a.get("assigned_to") or a["assigned_to"] >= today_iso)
-        ]
-
-        if not covering_today:
-            return success_response(
-                message="No compliance check due.", data={"missed_site_ids": []}
-            )
-
-        # Only worth checking once the employee's shift for today is over
-        # — flagging a "missed" visit mid-shift would just be wrong (they
-        # still have time to go). Same resolution + grace period the
-        # attendance reminder above uses.
-        rule = _get_attendance_rule()
-        shift = _get_employee_shift(employee_id, today)
-        if not shift or not shift.get("end_time"):
-            return success_response(
-                message="No compliance check due.", data={"missed_site_ids": []}
-            )
-
-        hh, mm, *_ = str(shift["end_time"]).split(":")
-        company_tz = _get_company_timezone()
-        scheduled_end_local = datetime.combine(
-            today, time(int(hh), int(mm)), tzinfo=company_tz
-        )
-        # Overnight shifts (end_time earlier than start than start_time)
-        # roll to the next day, same convention used elsewhere for shift
-        # math — otherwise this would fire hours too early for them.
-        if shift.get("start_time") and str(shift["end_time"]) < str(
-            shift["start_time"]
-        ):
-            scheduled_end_local += timedelta(days=1)
-        scheduled_end = scheduled_end_local.astimezone(timezone.utc).replace(
-            tzinfo=None
-        )
-
-        grace = shift.get("grace_period")
-        if grace is None:
-            grace = rule.get("late_grace_minutes", 0)
-
-        if _now_utc() < scheduled_end + timedelta(minutes=grace):
+        if not missed_assignments:
             return success_response(
                 message="No compliance check due.", data={"missed_site_ids": []}
             )
@@ -1907,23 +2110,9 @@ def get_site_visit_compliance_status(auth_user_id: str):
         day_start = datetime.combine(today, time(0, 0)).isoformat()
         missed_site_ids = []
 
-        for assignment in covering_today:
+        for assignment in missed_assignments:
             location_id = assignment.get("location_id")
-            site_name = (assignment.get("locations") or {}).get(
-                "location_name", "the assigned site"
-            )
-
-            visited = (
-                supabase_admin.table("attendance_site_visits")
-                .select("id")
-                .eq("employee_id", employee_id)
-                .eq("location_id", location_id)
-                .gte("arrival_time", day_start)
-                .limit(1)
-                .execute()
-            )
-            if visited and visited.data:
-                continue
+            site_name = assignment.get("location_name", "the assigned site")
 
             missed_site_ids.append(location_id)
 
@@ -1962,7 +2151,7 @@ def get_site_visit_compliance_status(auth_user_id: str):
                 action="SITE_VISIT_MISSED",
                 performed_by=auth_user_id,
                 target_employee_id=employee_id,
-                record_id=assignment.get("id"),
+                record_id=assignment.get("assignment_id"),
                 description=message,
             )
 
@@ -2226,6 +2415,99 @@ def get_team_site_visits_today(auth_user_id: str):
     except Exception as e:
         logger.exception(e)
         internal_server_error("Unable to fetch team site visits.")
+
+
+def get_team_site_visit_status_today(auth_user_id: str):
+    """
+    Manager-facing, PERSISTENT version of "did they visit their assigned
+    site today" — same underlying check as get_site_visit_compliance_status
+    (via the shared _get_missed_site_assignments helper: assignment must
+    cover today, and the employee's shift for today must already be over
+    + grace period), but:
+
+      - scoped to every field-staff report of the calling manager instead
+        of just the caller themselves, and
+      - purely read-only — it never sends a notification or writes an
+        audit log (get_site_visit_compliance_status already does that,
+        once, whenever that employee's own SiteVisitCard happens to poll
+        it). This just answers "who should I be following up with" for
+        manager/Attendance.jsx's "Not visited" badge, so it stays correct
+        even on a day the employee never opened the app for their own
+        self-check to fire, and it's safe to refetch as often as the page
+        likes with no side effects.
+
+    One row per field-staff report who has at least one active site
+    assignment (regardless of whether it covers today) — `missed_sites`
+    is [] whenever they're fully compliant, their shift isn't over yet,
+    or nothing is assigned for today specifically.
+    """
+    try:
+        manager_employee_id = get_employee_id_for_auth_user(auth_user_id)
+
+        if not manager_employee_id:
+            return success_response(
+                message="Team site visit status fetched successfully.", data=[]
+            )
+
+        report_ids = get_all_report_ids(manager_employee_id)
+        field_ids = get_field_employee_ids()
+        target_ids = [rid for rid in report_ids if rid in field_ids]
+
+        if not target_ids:
+            return success_response(
+                message="Team site visit status fetched successfully.", data=[]
+            )
+
+        assignment_rows = (
+            supabase_admin.table("employee_site_assignments")
+            .select("employee_id")
+            .in_("employee_id", target_ids)
+            .eq("is_active", True)
+            .execute()
+        ).data or []
+        assigned_employee_ids = sorted({row["employee_id"] for row in assignment_rows})
+
+        if not assigned_employee_ids:
+            return success_response(
+                message="Team site visit status fetched successfully.", data=[]
+            )
+
+        employees_resp = (
+            supabase_admin.table("employees")
+            .select("id, employee_id, full_name, profile_photo")
+            .in_("id", assigned_employee_ids)
+            .execute()
+        )
+        employees_by_id = {e["id"]: e for e in (employees_resp.data or [])}
+
+        today = _today_in_company_tz()
+
+        results = []
+        for employee_id in assigned_employee_ids:
+            missed_sites = _get_missed_site_assignments(employee_id, today)
+            results.append(
+                {
+                    "employee_id": employee_id,
+                    "employee": employees_by_id.get(employee_id, {}),
+                    "missed_sites": missed_sites,
+                    "has_missed": len(missed_sites) > 0,
+                }
+            )
+
+        # Employees with a missed site float to the top so the manager
+        # sees who needs following up with first.
+        results.sort(key=lambda r: 0 if r["has_missed"] else 1)
+
+        return success_response(
+            message="Team site visit status fetched successfully.", data=results
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception(e)
+        internal_server_error("Unable to fetch team site visit status.")
 
 
 def get_org_site_visits_today(auth_user_id: str):
@@ -3429,10 +3711,52 @@ def admin_update_attendance(
         )
 
         values = data.model_dump(exclude_unset=True)
+        explicit_status = values.get("status") if "status" in values else None
 
         for key in ("check_in_time", "check_out_time"):
             if key in values and values[key] is not None:
                 values[key] = values[key].isoformat()
+
+        # Recompute working_minutes / early_checkout_minutes /
+        # overtime_minutes / status whenever this edit touches
+        # check_in_time or check_out_time.
+        #
+        # This endpoint used to just write whatever check_in_time /
+        # check_out_time it was given and stop -- so e.g. the "Log a
+        # missed checkout" modal fixed check_out_time in the DB, but
+        # working_minutes (and therefore status, and everything derived
+        # from working_minutes downstream -- Attendance Reports' Hours
+        # column, its Excel export, and /attendance/analytics) kept
+        # showing the stale pre-fix figures, because nothing ever told
+        # this row to recalculate them. check_out() already computes
+        # these correctly for a normal self-service checkout, so that
+        # calculation was pulled out into _compute_checkout_fields() and
+        # is reused here for an admin edit.
+        resulting_check_in = values.get("check_in_time", existing.get("check_in_time"))
+        resulting_check_out = values.get(
+            "check_out_time", existing.get("check_out_time")
+        )
+
+        if (
+            ("check_in_time" in values or "check_out_time" in values)
+            and resulting_check_in
+            and resulting_check_out
+        ):
+            computed = _compute_checkout_fields(
+                existing["employee_id"],
+                date.fromisoformat(existing["attendance_date"]),
+                datetime.fromisoformat(resulting_check_in),
+                datetime.fromisoformat(resulting_check_out),
+                existing.get("break_minutes") or 0,
+            )
+            values["working_minutes"] = computed["working_minutes"]
+            values["early_checkout_minutes"] = computed["early_checkout_minutes"]
+            values["overtime_minutes"] = computed["overtime_minutes"]
+            # An explicit status in the request (HR deliberately marking
+            # a day Half Day, say) wins over the recompute -- only
+            # auto-fill it when the caller didn't set one.
+            if explicit_status is None:
+                values["status"] = computed["status"]
 
         updated = attendance_repo.update(attendance_id, values)
 
@@ -3442,7 +3766,12 @@ def admin_update_attendance(
             performed_by=getattr(current_user, "id", None),
             target_employee_id=updated.get("employee_id"),
             record_id=attendance_id,
-            description="Attendance record manually updated by HR/Admin",
+            description="Attendance record manually updated by HR/Admin"
+            + (
+                f" — {_format_duration_minutes(values['working_minutes'])} worked, status: {values['status']}"
+                if "working_minutes" in values
+                else ""
+            ),
             old_values=existing,
             new_values=updated,
             request=request,

@@ -494,13 +494,35 @@ def get_all_report_ids(manager_employee_id: str, max_depth: int = 10) -> list[st
 
 def get_field_employee_ids() -> set[str]:
     """
-    Ids of every employee whose designation sits under an
-    INSPECTION*/OPERATION* department — the staff who visit multiple
-    sites in a day and therefore get the Site Visits UI, as opposed to a
-    single fixed office/desk. Derived from department rather than a
-    dedicated boolean column, since department is already the source of
-    truth (see sql/014_designation_shifts_and_site_visits.sql) and the
-    set of "field" departments may grow later without a schema change.
+    Ids of every employee whose OWN department (employees.department_id)
+    sits under an INSPECTION*/OPERATION* department — the staff who visit
+    multiple sites in a day and therefore get the Site Visits UI, as
+    opposed to a single fixed office/desk.
+
+    NOTE: this used to be derived from the employee's DESIGNATION's
+    department (designations.department_id) instead of the employee's own
+    department field. That diverged from how the rest of the app already
+    decides the exact same thing:
+      - the frontend's own field-employee check (utils/employeeType.jsx's
+        isFieldEmployee()) reads `user.department` straight off GET
+        /auth/me — i.e. employees.department_id, not the designation's.
+      - "Employee Details" (GET /employees/my-team) shows DEPARTMENT from
+        that same employees.department_id column.
+
+    In practice a shared designation can be seeded under a department that
+    doesn't match every employee who holds it — e.g. "SENIOR QUANTITY
+    SURVEYOR CUM LOGISTICS" is seeded under "QS" in
+    sql/003_attendance_info_seed.sql — so an employee whose own department
+    field says INSPECTION but who happens to hold that designation used to
+    silently fail this check: excluded from the manager's "Team Members"
+    assign-site picker, rejected by assign_site_to_employees /
+    assign_site_to_team ("not in an Inspection/Operation role"), left out
+    of get_team_site_visits_today — even though their own dashboard
+    rendered the Site Visit card for them via the frontend's separate,
+    employees.department_id-based check. Keying off employees.department_id
+    here too makes "is this a field employee" agree everywhere, company-
+    wide, off one column.
+
     Returns an empty set (never raises) — callers treat this as
     best-effort, same convention as get_employee_ids_for_role().
     """
@@ -520,21 +542,10 @@ def get_field_employee_ids() -> set[str]:
         if not field_dept_ids:
             return set()
 
-        desig_response = (
-            supabase_admin.table("designations")
-            .select("id")
-            .in_("department_id", field_dept_ids)
-            .execute()
-        )
-        field_desig_ids = [d["id"] for d in (desig_response.data or [])]
-
-        if not field_desig_ids:
-            return set()
-
         emp_response = (
             supabase_admin.table("employees")
             .select("id")
-            .in_("designation_id", field_desig_ids)
+            .in_("department_id", field_dept_ids)
             .execute()
         )
 

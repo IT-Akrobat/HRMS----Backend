@@ -41,6 +41,7 @@ from app.attendance.services import (
     get_site_visits_for_attendance,
     get_my_site_visits_today,
     get_team_site_visits_today,
+    get_team_site_visit_status_today,
     get_org_site_visits_today,
     get_org_site_visits_history,
     get_employee_site_visits_history,
@@ -159,6 +160,16 @@ def site_visit_compliance_today(user=Depends(get_current_user)):
 def team_site_visits_today(user=Depends(require_permission("VIEW_ATTENDANCE"))):
     """Manager's live view: which of their field-staff reports are on-site right now."""
     return get_team_site_visits_today(user.id)
+
+
+# Manager-facing, persistent "who missed their assigned site today" view —
+# backs the "Not visited" badge on manager/Attendance.jsx's field staff
+# rows. Unlike /site-visit/compliance-today (self-service, fires a
+# one-time notification when the employee's own card polls it), this is
+# read-only and safe to reload any number of times with no side effects.
+@router.get("/team/site-visit-status-today")
+def team_site_visit_status_today(user=Depends(require_permission("VIEW_ATTENDANCE"))):
+    return get_team_site_visit_status_today(user.id)
 
 
 @router.get("/org/site-visits")
