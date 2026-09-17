@@ -645,6 +645,26 @@ def check_in(auth_user_id: str, data, request: Optional[Request] = None):
         internal_server_error("Unable to check in.")
 
 
+def _as_naive_utc(value) -> datetime:
+    """
+    Parse a check_in_time/check_out_time value (string or datetime) into
+    the naive-UTC datetime convention every other timestamp in this file
+    uses (see _now_utc()). Most stored values are already naive UTC
+    strings straight from the DB, but a value that came from a
+    regularization request's requested_check_in/requested_check_out (see
+    submit_regularization()) may still carry a timezone offset picked up
+    from Pydantic's datetime parsing. Mixing an offset-aware value with a
+    naive one blows up any subtraction between them ("can't subtract
+    offset-naive and offset-aware datetimes"), the same failure mode
+    admin_update_attendance's comment above describes -- so normalize
+    here before doing any arithmetic.
+    """
+    dt = value if isinstance(value, datetime) else datetime.fromisoformat(value)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
 def _compute_checkout_fields(
     employee_id: str,
     attendance_date,
@@ -3135,6 +3155,38 @@ def decide_regularization(
                 patch["check_in_time"] = existing["requested_check_in"]
             if existing.get("requested_check_out"):
                 patch["check_out_time"] = existing["requested_check_out"]
+
+            # Recompute working_minutes / early_checkout_minutes /
+            # overtime_minutes here too -- same gap admin_update_attendance
+            # used to have (see its docstring). Approving a regularization
+            # request rewrote check_in_time/check_out_time above but never
+            # told the row to recalculate working_minutes, so the fixed
+            # checkout showed up fine on the attendance row itself while
+            # Attendance Reports' Hours column and its Excel export kept
+            # showing the stale (usually 0/blank) figure computed at the
+            # original, forgotten checkout. Reuse the same
+            # _compute_checkout_fields() admin_update_attendance calls so
+            # both "fix a missed checkout" paths behave identically.
+            attendance_record = attendance_repo.get_by_id(existing["attendance_id"])
+            if attendance_record:
+                resulting_check_in = patch.get(
+                    "check_in_time", attendance_record.get("check_in_time")
+                )
+                resulting_check_out = patch.get(
+                    "check_out_time", attendance_record.get("check_out_time")
+                )
+                if resulting_check_in and resulting_check_out:
+                    computed = _compute_checkout_fields(
+                        target_employee_id,
+                        date.fromisoformat(attendance_record["attendance_date"]),
+                        _as_naive_utc(resulting_check_in),
+                        _as_naive_utc(resulting_check_out),
+                        attendance_record.get("break_minutes") or 0,
+                    )
+                    patch["working_minutes"] = computed["working_minutes"]
+                    patch["early_checkout_minutes"] = computed["early_checkout_minutes"]
+                    patch["overtime_minutes"] = computed["overtime_minutes"]
+                    patch["status"] = computed["status"]
 
             attendance_repo.update(existing["attendance_id"], patch)
 
