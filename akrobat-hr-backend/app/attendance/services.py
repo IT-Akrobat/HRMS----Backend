@@ -3715,7 +3715,24 @@ def admin_update_attendance(
 
         for key in ("check_in_time", "check_out_time"):
             if key in values and values[key] is not None:
-                values[key] = values[key].isoformat()
+                dt = values[key]
+                # The client sends a full ISO datetime with an explicit
+                # offset (JS's toISOString() always ends in "Z"), so
+                # Pydantic parses this as timezone-aware. Every
+                # check_in_time/check_out_time already sitting in the DB
+                # (and every other datetime this file works with -- see
+                # _now_utc()) is naive UTC: a bare timestamp with no
+                # offset. Mixing the two blew up the recompute below --
+                # `aware_check_out - naive_check_in` raises
+                # "can't subtract offset-naive and offset-aware
+                # datetimes", which this function's outer except then
+                # swallowed into the generic "Unable to update
+                # attendance record." error. Strip the offset here (after
+                # converting to UTC) so this value matches the naive-UTC
+                # convention everything else in this file assumes.
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                values[key] = dt.isoformat()
 
         # Recompute working_minutes / early_checkout_minutes /
         # overtime_minutes / status whenever this edit touches
