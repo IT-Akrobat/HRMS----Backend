@@ -160,14 +160,36 @@ def get_action_logs(action: str, page: int = 1, limit: int = 50):
         start = (max(page, 1) - 1) * max(min(limit, 200), 1)
         end = start + max(min(limit, 200), 1) - 1
 
-        records, total = audit_log_repo.list(
-            select=AUDIT_LOG_SELECT,
-            filters={"action": action},
-            order_by="created_at",
-            ascending=False,
-            start=start,
-            end=end,
-        )
+        # `action` is usually a single value (CHECK_IN, CHECK_OUT, ...), but
+        # callers that need an OR across a small family of actions — e.g.
+        # the Audit Logs UI's "Site Visit" quick filter, which has to match
+        # both SITE_VISIT_ARRIVE and SITE_VISIT_DEPART — pass a
+        # comma-separated list instead. SupabaseRepository.list() only
+        # supports .eq() filters, so a multi-value list falls through to a
+        # raw .in_() query here rather than going through the repo.
+        actions = [a.strip() for a in action.split(",") if a.strip()]
+
+        if len(actions) > 1:
+            from app.core.database import supabase_admin
+
+            response = (
+                supabase_admin.table("audit_logs")
+                .select(AUDIT_LOG_SELECT, count="exact")
+                .in_("action", actions)
+                .order("created_at", desc=True)
+                .range(start, end)
+                .execute()
+            )
+            records, total = response.data or [], (response.count or 0)
+        else:
+            records, total = audit_log_repo.list(
+                select=AUDIT_LOG_SELECT,
+                filters={"action": action},
+                order_by="created_at",
+                ascending=False,
+                start=start,
+                end=end,
+            )
 
         return success_response(
             message="Audit logs fetched successfully.",
