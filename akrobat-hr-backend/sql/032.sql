@@ -278,3 +278,39 @@ alter table attendance_site_visits
  
 alter table attendance_site_visits
     add column if not exists auto_close_reason text;
+
+
+
+    -- =====================================================================
+-- PERSISTENT "MISSED SITE VISIT" FLAG ON employee_site_assignments
+-- =====================================================================
+-- Until now, "did this employee miss their assigned site today" was
+-- computed fresh every day by _get_missed_site_assignments() (app/
+-- attendance/services.py) — purely by looking at whether an
+-- attendance_site_visits row exists for today. That reset itself every
+-- midnight: an employee who missed a visit yesterday got a brand-new,
+-- fully-unlocked "Arrived" button again today, and the manager's
+-- "Not visited" badge (GET /attendance/team/site-visit-status-today)
+-- only ever reflected *today's* status.
+--
+-- Product decision: once a site visit is flagged missed, it should stay
+-- flagged — the employee's "Arrived" button for that site stays locked,
+-- and the manager keeps seeing the alert — until the manager takes an
+-- explicit action on that assignment (reassigns the same or a
+-- different site). This migration adds the two columns that make that
+-- state persistent instead of recomputed-and-forgotten every day.
+--
+-- Safe to re-run: `add column if not exists`.
+-- =====================================================================
+
+alter table employee_site_assignments
+    add column if not exists is_missed boolean not null default false;
+
+alter table employee_site_assignments
+    add column if not exists missed_since timestamptz;
+
+-- Fast lookup for "which of my team's assignments are currently
+-- flagged" (manager Team Members / Attendance pages).
+create index if not exists idx_site_assignments_missed
+    on employee_site_assignments(employee_id)
+    where is_missed = true;

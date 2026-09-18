@@ -438,8 +438,25 @@ def _enforce_assigned_site(employee_id: str, location_id: Optional[str], action:
     assignments log a visit to *any* company location — the backend
     counterpart of the "shows every site" bug in SiteVisitCard.jsx),
     and raises 400 if the given location isn't one of the assigned ones.
+
+    Also raises 400 if the assignment for that site is currently flagged
+    `is_missed` (see sql/035_persistent_missed_site_flag.sql) — this is
+    the server-side twin of SiteVisitCard.jsx disabling "Arrived" for a
+    missed site: without this, someone could still call the API
+    directly and log a late arrival after their manager was already told
+    it was missed. The lock only lifts when the manager reassigns the
+    site (site_assignments/services.py clears is_missed on that call),
+    never just by trying again.
     """
-    assigned_ids = _get_active_assigned_location_ids(employee_id)
+    response = (
+        supabase_admin.table("employee_site_assignments")
+        .select("location_id, is_missed")
+        .eq("employee_id", employee_id)
+        .eq("is_active", True)
+        .execute()
+    )
+    assignments = response.data or []
+    assigned_ids = [a["location_id"] for a in assignments if a.get("location_id")]
 
     if not assigned_ids:
         bad_request(
@@ -450,6 +467,16 @@ def _enforce_assigned_site(employee_id: str, location_id: Optional[str], action:
     if not location_id or location_id not in assigned_ids:
         bad_request(
             f"You can only {action} from the site your manager assigned you to."
+        )
+
+    is_missed = any(
+        a.get("is_missed") for a in assignments if a.get("location_id") == location_id
+    )
+    if is_missed:
+        bad_request(
+            "This site was already flagged as a missed visit to your "
+            "manager. Ask your manager to reassign the site before you "
+            "can log a new visit."
         )
 
 
@@ -2015,35 +2042,67 @@ def _get_missed_site_assignments(employee_id: str, today: date) -> list[dict]:
         — flagging a "missed" visit mid-shift would be wrong, they still
         have time to go.
 
-    Otherwise returns one dict per assigned site with no
-    attendance_site_visits row logged for it today:
+    Once a site is found missed, `is_missed` is persisted on its
+    employee_site_assignments row (see sql/035_persistent_missed_site_
+    flag.sql) instead of being recomputed fresh every day — an
+    assignment already flagged is returned immediately here on every
+    later call, on any day, with none of the shift-end/visit checks
+    re-run. That's what keeps the employee's "Arrived" button locked and
+    the manager's "Not visited" alert showing beyond the day it was
+    first missed. The only way to clear it is an explicit manager action
+    on the assignment (reassigning the same or a different site — see
+    site_assignments/services.py), not the passage of time.
+
+    Otherwise (for an assignment not yet flagged) returns one dict per
+    assigned site with no attendance_site_visits row logged for it
+    today:
         {"assignment_id", "location_id", "location_name"}
     """
     today_iso = today.isoformat()
 
     assignments = (
         supabase_admin.table("employee_site_assignments")
-        .select("id, location_id, assigned_from, assigned_to, locations(location_name)")
+        .select(
+            "id, location_id, assigned_from, assigned_to, is_missed, "
+            "locations(location_name)"
+        )
         .eq("employee_id", employee_id)
         .eq("is_active", True)
         .execute()
     )
 
+    all_assignments = assignments.data or []
+
+    # Already flagged on a previous day — stays "missed" until the
+    # manager reassigns, no further date/shift math needed.
+    already_missed = [
+        {
+            "assignment_id": a.get("id"),
+            "location_id": a.get("location_id"),
+            "location_name": (a.get("locations") or {}).get(
+                "location_name", "the assigned site"
+            ),
+        }
+        for a in all_assignments
+        if a.get("is_missed")
+    ]
+
     covering_today = [
         a
-        for a in (assignments.data or [])
-        if (not a.get("assigned_from") or a["assigned_from"] <= today_iso)
+        for a in all_assignments
+        if not a.get("is_missed")
+        and (not a.get("assigned_from") or a["assigned_from"] <= today_iso)
         and (not a.get("assigned_to") or a["assigned_to"] >= today_iso)
     ]
 
     if not covering_today:
-        return []
+        return already_missed
 
     # Same shift resolution + grace period the attendance reminder uses.
     rule = _get_attendance_rule()
     shift = _get_employee_shift(employee_id, today)
     if not shift or not shift.get("end_time"):
-        return []
+        return already_missed
 
     hh, mm, *_ = str(shift["end_time"]).split(":")
     company_tz = _get_company_timezone()
@@ -2062,10 +2121,10 @@ def _get_missed_site_assignments(employee_id: str, today: date) -> list[dict]:
         grace = rule.get("late_grace_minutes", 0)
 
     if _now_utc() < scheduled_end + timedelta(minutes=grace):
-        return []
+        return already_missed
 
     day_start = datetime.combine(today, time(0, 0)).isoformat()
-    missed = []
+    newly_missed = []
 
     for assignment in covering_today:
         location_id = assignment.get("location_id")
@@ -2085,7 +2144,21 @@ def _get_missed_site_assignments(employee_id: str, today: date) -> list[dict]:
         if visited and visited.data:
             continue
 
-        missed.append(
+        # Persist it — from here on this assignment is "missed" on every
+        # future call (any day) until the manager explicitly reassigns
+        # it (see site_assignments/services.py, which clears these two
+        # columns on the next assign/re-assign call for this employee).
+        try:
+            supabase_admin.table("employee_site_assignments").update(
+                {"is_missed": True, "missed_since": _now_utc().isoformat()}
+            ).eq("id", assignment.get("id")).execute()
+        except Exception as e:
+            logger.error(
+                f"Failed to persist missed-site flag for assignment "
+                f"{assignment.get('id')}: {e}"
+            )
+
+        newly_missed.append(
             {
                 "assignment_id": assignment.get("id"),
                 "location_id": location_id,
@@ -2093,7 +2166,7 @@ def _get_missed_site_assignments(employee_id: str, today: date) -> list[dict]:
             }
         )
 
-    return missed
+    return already_missed + newly_missed
 
 
 def get_site_visit_compliance_status(auth_user_id: str):

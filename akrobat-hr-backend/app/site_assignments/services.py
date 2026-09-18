@@ -143,13 +143,21 @@ def _assign_location_to_employees(
 
         if existing_same_site.data:
             assignment_id = existing_same_site.data[0]["id"]
-            update_payload = {"notes": notes} if notes is not None else {}
+            # Re-assigning the same site is itself the manager's explicit
+            # "reassign" action — clears a persisted missed-visit flag
+            # (see sql/035_persistent_missed_site_flag.sql) the same way
+            # picking a different site does below, so the employee's
+            # "Arrived" button unlocks and the manager's "Not visited"
+            # alert clears. Always applied, even if notes/assigned_to
+            # weren't touched, so "Assign Site" alone is enough to clear it.
+            update_payload = {"is_missed": False, "missed_since": None}
+            if notes is not None:
+                update_payload["notes"] = notes
             if assigned_to is not None:
                 update_payload["assigned_to"] = assigned_to.isoformat()
-            if update_payload:
-                supabase_admin.table("employee_site_assignments").update(
-                    update_payload
-                ).eq("id", assignment_id).execute()
+            supabase_admin.table("employee_site_assignments").update(update_payload).eq(
+                "id", assignment_id
+            ).execute()
             row = (
                 supabase_admin.table("employee_site_assignments")
                 .select(SITE_ASSIGNMENT_SELECT)
@@ -367,7 +375,8 @@ def get_my_team_with_sites(auth_user_id: str):
         assignments_resp = (
             supabase_admin.table("employee_site_assignments")
             .select(
-                "employee_id, location_id, locations(id, location_name, location_code)"
+                "employee_id, location_id, is_missed, missed_since, "
+                "locations(id, location_name, location_code)"
             )
             .in_("employee_id", report_ids)
             .eq("is_active", True)
@@ -376,9 +385,14 @@ def get_my_team_with_sites(auth_user_id: str):
 
         sites_by_employee: dict[str, list] = {}
         for row in assignments_resp.data or []:
-            sites_by_employee.setdefault(row["employee_id"], []).append(
-                row.get("locations")
-            )
+            site = dict(row.get("locations") or {})
+            # Surfaced so Team Members can show a persistent "Missed —
+            # needs reassignment" badge next to the site chip, not just
+            # on the separate Attendance page — see sql/035_persistent_
+            # missed_site_flag.sql for why this doesn't reset daily.
+            site["is_missed"] = row.get("is_missed", False)
+            site["missed_since"] = row.get("missed_since")
+            sites_by_employee.setdefault(row["employee_id"], []).append(site)
 
         team = []
         for emp in employees_resp.data or []:
@@ -479,6 +493,13 @@ def update_site_assignment(
             update_data["assigned_from"] = update_data["assigned_from"].isoformat()
         if "assigned_to" in update_data and update_data["assigned_to"] is not None:
             update_data["assigned_to"] = update_data["assigned_to"].isoformat()
+
+        # Any explicit manager edit to this assignment counts as
+        # "reassigning" it — clears a persisted missed-visit flag (see
+        # sql/035_persistent_missed_site_flag.sql) the same way creating
+        # a fresh assignment via assign_site_to_employees does.
+        update_data["is_missed"] = False
+        update_data["missed_since"] = None
 
         response = (
             supabase_admin.table("employee_site_assignments")
