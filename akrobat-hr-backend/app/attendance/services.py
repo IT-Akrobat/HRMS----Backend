@@ -2169,6 +2169,42 @@ def _get_missed_site_assignments(employee_id: str, today: date) -> list[dict]:
     return already_missed + newly_missed
 
 
+def flag_missed_site_visits_for_all_employees() -> None:
+    """
+    Scheduled counterpart of get_site_visit_compliance_status() /
+    get_team_site_visit_status_today() — those two only ever run
+    _get_missed_site_assignments() when an employee's own dashboard or
+    their manager's Attendance page happens to be open. If neither is
+    open during the window after that employee's shift ends and before
+    midnight, that day's miss is never detected or persisted, and the
+    next day's check only looks at "today" — so it's gone for good.
+
+    This runs the exact same helper for EVERY field employee, on a
+    timer (see main.py's startup event), independent of anyone using
+    the app. Safe to call as often as you like: an employee already
+    flagged, or one still mid-shift, is a no-op inside
+    _get_missed_site_assignments.
+    """
+    from app.core.helpers.employee_helper import get_field_employee_ids
+
+    today = _today_in_company_tz()
+    field_employee_ids = get_field_employee_ids()
+
+    for employee_id in field_employee_ids:
+        try:
+            missed = _get_missed_site_assignments(employee_id, today)
+            for m in missed:
+                logger.info(
+                    f"[site-visit-check] employee_id={employee_id} "
+                    f"site={m.get('location_name')} "
+                    f"assignment_id={m.get('assignment_id')}"
+                )
+        except Exception as e:
+            logger.error(
+                f"[site-visit-check] failed for employee_id={employee_id}: {e}"
+            )
+
+
 def get_site_visit_compliance_status(auth_user_id: str):
     """
     For the CURRENT employee: uses _get_missed_site_assignments() to find

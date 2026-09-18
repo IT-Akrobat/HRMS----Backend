@@ -2,6 +2,7 @@ import asyncio
 import sys
 from types import SimpleNamespace
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
@@ -9,6 +10,10 @@ from slowapi.errors import RateLimitExceeded
 
 from app.core.limiter import limiter
 from app.core.ws_tickets import redeem_ticket
+from app.attendance.services import (
+    flag_missed_site_visits_for_all_employees,
+    _get_company_timezone,
+)
 
 # Windows-only fix: uvicorn's default ProactorEventLoop on Windows has a
 # known race with httpx's connection-pooled sync client (what supabase-py
@@ -138,6 +143,30 @@ async def _capture_event_loop():
     # threads (see app/core/realtime.py) — it needs a reference to *this*
     # loop to hop back onto it.
     realtime.set_main_loop(asyncio.get_running_loop())
+
+
+_scheduler = AsyncIOScheduler()
+
+
+@app.on_event("startup")
+async def _start_site_visit_check_scheduler():
+    # See flag_missed_site_visits_for_all_employees() in
+    # attendance/services.py for why this exists: without it, a missed
+    # site visit is only ever detected if an employee's own dashboard or
+    # their manager's Attendance page happens to be open right after
+    # that employee's shift ends. Runs hourly from 5 PM-11 PM company
+    # time to catch every shift's end time; re-running is a safe no-op
+    # for anyone already flagged or still mid-shift.
+    _scheduler.add_job(
+        flag_missed_site_visits_for_all_employees,
+        "cron",
+        hour="17-23",
+        minute=0,
+        timezone=_get_company_timezone(),
+        id="flag_missed_site_visits",
+        replace_existing=True,
+    )
+    _scheduler.start()
 
 
 @app.websocket("/ws/dashboard")
