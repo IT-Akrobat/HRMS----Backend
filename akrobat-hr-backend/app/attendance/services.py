@@ -480,7 +480,11 @@ def _enforce_assigned_site(employee_id: str, location_id: Optional[str], action:
         )
 
 
-def _resolve_location_name(location_id: Optional[str]) -> Optional[str]:
+def _resolve_location_name(
+    location_id: Optional[str],
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+) -> Optional[str]:
     """
     Looks up `locations.location_name` for the location_id the client
     matched client-side (see CheckInOutCard.jsx's nearest-office logic).
@@ -490,19 +494,59 @@ def _resolve_location_name(location_id: Optional[str]) -> Optional[str]:
     before. Best-effort: returns None (and the caller just omits the
     location clause) if location_id is missing or the lookup fails —
     never blocks the check-in itself.
+
+    check_in/check_out don't enforce a geofence (unlike arrive_at_site,
+    see _validate_geofence) — an employee can check in from anywhere.
+    That's fine for the attendance record itself, but this function feeds
+    the human-readable "at <name>" clause, and the client's "nearest"
+    match has no distance cutoff (see CheckInOutCard.jsx): if the
+    employee's real GPS fix is nowhere near any configured location
+    (e.g. actually in Singapore, only a Chennai site configured), the
+    client's nearest-location_id can still point at a site hundreds of
+    km away, which used to make the description flatly wrong ("Checked
+    in — at Rani Hall") while the record's own stored coordinates /
+    reverse-geocoded address correctly showed Singapore.
+    When latitude/longitude are given, this re-checks that the resolved
+    location is at least plausibly where the employee actually was
+    (within its own configured radius, or a generous 2km fallback when
+    the site has no radius set) before using its name — otherwise it
+    returns None and the caller just omits the "at ..." clause, the same
+    as if location_id had never been sent at all. The frontend is
+    expected to only send a location_id it has already matched within
+    radius, so this is a defensive backstop against a stale client
+    build or a bogus location_id sent directly to the API, not the
+    primary fix.
     """
     if not location_id:
         return None
     try:
         location = (
             supabase_admin.table("locations")
-            .select("location_name")
+            .select("location_name, latitude, longitude, radius")
             .eq("id", location_id)
             .maybe_single()
             .execute()
         )
-        if location and location.data:
-            return location.data.get("location_name")
+        if not location or not location.data:
+            return None
+
+        loc = location.data
+        name = loc.get("location_name")
+
+        if latitude is not None and longitude is not None:
+            loc_lat = loc.get("latitude")
+            loc_lon = loc.get("longitude")
+            if loc_lat is not None and loc_lon is not None:
+                distance_m = _haversine_meters(latitude, longitude, loc_lat, loc_lon)
+                allowed_radius = loc.get("radius") or 2000  # generous fallback
+                if distance_m > allowed_radius:
+                    logger.info(
+                        f"Skipping location name '{name}' for audit description: "
+                        f"{int(distance_m)}m away, outside {allowed_radius}m radius."
+                    )
+                    return None
+
+        return name
     except Exception as e:
         logger.error(f"Failed to resolve location name for {location_id}: {e}")
     return None
@@ -633,7 +677,9 @@ def check_in(auth_user_id: str, data, request: Optional[Request] = None):
         except Exception as e:
             logger.error(f"Failed to send check-in notification: {e}")
 
-        location_name = _resolve_location_name(data.location_id)
+        location_name = _resolve_location_name(
+            data.location_id, data.latitude, data.longitude
+        )
 
         record_audit_log(
             module="ATTENDANCE",
@@ -810,7 +856,9 @@ def check_out(auth_user_id: str, data, request: Optional[Request] = None):
             },
         )
 
-        location_name = _resolve_location_name(data.location_id)
+        location_name = _resolve_location_name(
+            data.location_id, data.latitude, data.longitude
+        )
 
         record_audit_log(
             module="ATTENDANCE",
