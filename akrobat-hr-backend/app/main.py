@@ -145,6 +145,21 @@ async def _capture_event_loop():
     realtime.set_main_loop(asyncio.get_running_loop())
 
 
+@app.on_event("startup")
+async def _cap_sync_threadpool():
+    # Every sync `def` route runs in a worker thread, and app/core/database.py
+    # lazily builds + permanently caches one Supabase client (own httpx
+    # connection pool) per thread the first time it's used. Starlette's
+    # default limiter allows up to 40 such threads, which on a 512 MB/0.5 CPU
+    # instance means up to 80 live connection pools that never get released
+    # for the life of the process. This box can't usefully run more than a
+    # handful of these in parallel anyway, so cap it low and keep memory
+    # bounded instead of trading it for concurrency we don't have the CPU for.
+    import anyio.to_thread
+
+    anyio.to_thread.current_default_thread_limiter().total_tokens = 10
+
+
 _scheduler = AsyncIOScheduler()
 
 
