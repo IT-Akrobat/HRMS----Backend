@@ -168,6 +168,27 @@ def generate_temp_password(length: int = 10) -> str:
 
 
 # ==========================================
+# PLACEHOLDER LOGIN EMAIL (employees created without an email)
+# ==========================================
+#
+# Email is optional when creating a user. Supabase Auth still needs
+# *some* email to create the login, so an employee created without one
+# gets an internal placeholder address derived from the employee code.
+# It is only ever stored on the Supabase Auth user -- employees.email
+# stays NULL, so HR sees a blank email and can fill it in later
+# (update_employee() then syncs the real address to Supabase Auth).
+PLACEHOLDER_EMAIL_DOMAIN = "noemail.akrobat.local"
+
+
+def placeholder_login_email(employee_code: str) -> str:
+    return f"{employee_code.strip().lower()}@{PLACEHOLDER_EMAIL_DOMAIN}"
+
+
+def is_placeholder_email(email: str | None) -> bool:
+    return bool(email) and email.lower().endswith("@" + PLACEHOLDER_EMAIL_DOMAIN)
+
+
+# ==========================================
 # LOOKUP EMAIL BY EMPLOYEE CODE (for login)
 # ==========================================
 #

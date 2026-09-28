@@ -19,6 +19,7 @@ from app.core.helpers.employee_helper import (
     get_employee_id_for_auth_user,
     get_all_report_ids,
     is_field_employee,
+    placeholder_login_email,
 )
 from app.core.validators import validate_email
 from app.core.audit import record_audit_log
@@ -122,12 +123,14 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
     auth_user_id = None
 
     try:
-        # Email is required -- no more optional-email flow, and no more
-        # placeholder login derived from the employee code. Format is
-        # checked (any domain is fine, not just @akrobat.com.sg), and
-        # uniqueness is checked before we touch Supabase auth.
-        validate_email(data.email)
-        check_email_exists(data.email)
+        # Email is optional. When one is given its format is checked (any
+        # domain is fine, not just @akrobat.com.sg) and uniqueness is
+        # checked before we touch Supabase auth. When it's blank the
+        # employee is created without an email (employees.email = NULL)
+        # and HR can add it later via Edit User.
+        if data.email:
+            validate_email(data.email)
+            check_email_exists(data.email)
 
         validate_reference("departments", data.department_id, "Department")
         validate_reference("designations", data.designation_id, "Designation")
@@ -185,11 +188,16 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
         )
         generated_password = generate_temp_password()
 
-        employee_email = data.email
+        # employees.email: the real email, or None if none was given.
+        employee_email = data.email or None
+        # Supabase Auth always needs an email to create the login, so an
+        # employee without one gets an internal placeholder (only on the
+        # auth user -- never stored in employees.email).
+        auth_login_email = employee_email or placeholder_login_email(new_employee_id)
 
         auth_user = supabase_admin.auth.admin.create_user(
             {
-                "email": employee_email,
+                "email": auth_login_email,
                 "password": generated_password,
                 "email_confirm": True,
             }

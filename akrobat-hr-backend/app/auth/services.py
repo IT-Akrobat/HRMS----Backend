@@ -17,7 +17,11 @@ from app.core.audit import record_audit_log
 from app.core.database import supabase_admin
 from app.core.exceptions import bad_request, forbidden, unauthorized
 from app.core.database import supabase
-from app.core.helpers.employee_helper import get_employee_by_code
+from app.core.helpers.employee_helper import (
+    get_employee_by_code,
+    is_placeholder_email,
+    placeholder_login_email,
+)
 from app.core.rbac import get_permissions_for_role
 from app.core.request_ip import get_client_ip
 from app.core.sidebar import build_sidebar
@@ -44,7 +48,10 @@ def login_user(employee_code: str, password: str, request: Request = None):
     if not employee:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    email = employee["email"]
+    # Employees created without an email have employees.email = NULL;
+    # their Supabase Auth login uses an internal placeholder derived from
+    # the employee code (see employee_helper.placeholder_login_email).
+    email = employee.get("email") or placeholder_login_email(employee_code)
     employee_id = employee["id"]
 
     access_control = get_access_control_settings()
@@ -391,7 +398,10 @@ def get_me(auth_user) -> dict:
         # Management screens never showed up here. employees.email is
         # the one HR actually manages, so it must be the source of
         # truth for what the employee sees.
-        "email": employee.get("email") or auth_user.email,
+        # Never expose the internal placeholder login email -- an employee
+        # created without an email just has a blank one here.
+        "email": employee.get("email")
+        or (None if is_placeholder_email(auth_user.email) else auth_user.email),
         "role": role_name,
         "role_id": role_id,
         "organization": None,

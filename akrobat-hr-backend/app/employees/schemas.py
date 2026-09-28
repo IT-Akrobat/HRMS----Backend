@@ -18,10 +18,18 @@ class EmployeeCreate(BaseModel):
 
     full_name: str = Field(..., min_length=2, max_length=100)
 
-    # Required -- no auto-generated placeholder login email anymore. HR
-    # must supply a real email; the employee code is never appended to
-    # build one (see app/employees/services.py create_employee()).
-    email: EmailStr
+    # Optional. If left blank the employee is created with no email on
+    # file (employees.email = NULL) and can log in with the employee code
+    # + generated password as usual; HR can add the real email later via
+    # Edit User (see app/employees/services.py create_employee()).
+    email: Optional[EmailStr] = None
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _blank_email_to_none(cls, v):
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
     # No longer accepted from the client -- see app/employees/services.py
     # create_employee(). The employee_id (code) is auto-generated from
