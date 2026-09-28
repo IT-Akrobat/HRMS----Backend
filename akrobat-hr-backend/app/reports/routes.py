@@ -12,6 +12,7 @@ from app.reports.services import (
     dashboard_report,
     employee_full_report,
     employee_monthly_attendance_report,
+    all_employees_monthly_attendance_report,
 )
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
@@ -42,6 +43,15 @@ def attendance_employee_monthly(
     action."""
 
     return employee_monthly_attendance_report(employee_id, month)
+
+
+@router.get("/attendance/monthly")
+def attendance_all_monthly(month: str, user=Depends(get_current_user)):
+    """Every employee's full-calendar attendance for one month
+    (?month=YYYY-MM) -- all dates, with Leave / off-day handling --
+    for the month-only Excel download."""
+
+    return all_employees_monthly_attendance_report(month)
 
 
 @router.get("/attendance")

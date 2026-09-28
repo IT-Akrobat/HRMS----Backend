@@ -569,6 +569,146 @@ def employee_full_report(employee_id: str):
 
 
 # =========================
+# FULL-CALENDAR HELPERS (Excel monthly attendance)
+# =========================
+# The monthly Excel export must list EVERY date of the month, not just
+# the days that have an attendance row. For each date we work out a
+# day_type:
+#   "Record" -- normal day: use the attendance row (may be missing ->
+#               the export leaves the cells empty)
+#   "Holiday"-- public holiday (holidays table, observed date) on a
+#               working day -> Status says "Holiday (<name>)", rest empty
+#   "Leave"  -- employee has an Approved leave covering that date
+#   "Off"    -- Sunday, or a Saturday this employee doesn't work
+#               (works_saturday = false, or alternate_saturday = true
+#               and it isn't the 1st/3rd Saturday) -> export leaves the
+#               whole row empty (date only)
+# A day on which the employee actually checked in always stays a
+# "Record", so real work is never hidden by these rules. Priority when
+# rules overlap: worked > Off > Holiday > Leave (a leave that falls on a
+# holiday just shows as the holiday).
+
+
+def _is_first_or_third_saturday(d: date) -> bool:
+    return ((d.day - 1) // 7 + 1) in (1, 3)
+
+
+def _is_off_day(d: date, works_saturday: bool, alternate_saturday: bool) -> bool:
+    if d.weekday() == 6:  # Sunday -- everyone is off
+        return True
+    if d.weekday() == 5:  # Saturday -- depends on the employee
+        if not works_saturday:
+            return True
+        if alternate_saturday and not _is_first_or_third_saturday(d):
+            return True
+    return False
+
+
+def _leave_dates_in_range(leave_rows, start: date, end: date) -> set:
+    dates = set()
+    for row in leave_rows or []:
+        try:
+            ls = max(date.fromisoformat(str(row["start_date"])[:10]), start)
+            le = min(date.fromisoformat(str(row["end_date"])[:10]), end)
+        except (KeyError, ValueError, TypeError):
+            continue
+        d = ls
+        while d <= le:
+            dates.add(d)
+            d += timedelta(days=1)
+    return dates
+
+
+def _holidays_in_range(start: date, end: date) -> dict:
+    """{date: holiday_name} for public holidays in start..end. Uses the
+    observed date (holidays.holiday_date -- already Sunday->Monday
+    shifted). Employees aren't tagged with a country, so every
+    holiday row applies to everyone (same as the holiday reminders)."""
+    rows = (
+        supabase_admin.table("holidays")
+        .select("holiday_name, holiday_date")
+        .gte("holiday_date", start.isoformat())
+        .lte("holiday_date", end.isoformat())
+        .execute()
+        .data
+        or []
+    )
+    out = {}
+    for r in rows:
+        try:
+            d = date.fromisoformat(str(r["holiday_date"])[:10])
+        except (KeyError, ValueError, TypeError):
+            continue
+        out.setdefault(d, (r.get("holiday_name") or "").strip())
+    return out
+
+
+def _build_month_days(
+    start: date,
+    end: date,
+    records,
+    leave_dates: set,
+    works_saturday: bool,
+    alternate_saturday: bool,
+    holidays: dict | None = None,
+):
+    """One entry per calendar day from start..end (inclusive)."""
+    holidays = holidays or {}
+    by_date = {str(r.get("attendance_date"))[:10]: r for r in (records or [])}
+    days = []
+    d = start
+    while d <= end:
+        rec = by_date.get(d.isoformat())
+        worked = bool(rec and rec.get("check_in_time"))
+        if worked:
+            day_type = "Record"
+        elif _is_off_day(d, works_saturday, alternate_saturday):
+            day_type = "Off"
+        elif d in holidays:
+            day_type = "Holiday"
+        elif d in leave_dates:
+            day_type = "Leave"
+        else:
+            day_type = "Record"
+        days.append(
+            {
+                "attendance_date": d.isoformat(),
+                "day_type": day_type,
+                "holiday_name": holidays.get(d) if day_type == "Holiday" else None,
+                "record": rec if day_type == "Record" else None,
+            }
+        )
+        d += timedelta(days=1)
+    return days
+
+
+def _month_bounds(month: str):
+    try:
+        year_str, month_str = month.split("-")
+        year, month_num = int(year_str), int(month_str)
+        if not (1 <= month_num <= 12):
+            raise ValueError
+    except ValueError:
+        raise HTTPException(400, "month must be in YYYY-MM format, e.g. 2026-07.")
+    start = date(year, month_num, 1)
+    end = (
+        date(year + 1, 1, 1) if month_num == 12 else date(year, month_num + 1, 1)
+    ) - timedelta(days=1)
+    return start, end
+
+
+def _fetch_all(build_query, page_size: int = 1000):
+    """Supabase caps a response at ~1000 rows; page through them all."""
+    rows, offset = [], 0
+    while True:
+        chunk = build_query().range(offset, offset + page_size - 1).execute().data or []
+        rows.extend(chunk)
+        if len(chunk) < page_size:
+            return rows
+        offset += page_size
+
+
+# =========================
 # SINGLE EMPLOYEE — MONTHLY ATTENDANCE
 # =========================
 # One employee, one calendar month: every day's record plus the month's
@@ -580,21 +720,10 @@ def employee_monthly_attendance_report(employee_id: str, month: str):
 
     try:
 
-        try:
-            year_str, month_str = month.split("-")
-            year, month_num = int(year_str), int(month_str)
-            if not (1 <= month_num <= 12):
-                raise ValueError
-        except ValueError:
-            raise HTTPException(400, "month must be in YYYY-MM format, e.g. 2026-07.")
-
-        start = date(year, month_num, 1)
-        end = (
-            date(year + 1, 1, 1) if month_num == 12 else date(year, month_num + 1, 1)
-        ) - timedelta(days=1)
+        start, end = _month_bounds(month)
 
         emp_resp = supabase_admin.table("employees").select("""
-                full_name, employee_id,
+                full_name, employee_id, works_saturday, alternate_saturday,
                 departments!employees_department_id_fkey(department_name),
                 designations(designation_name)
                 """).eq("id", employee_id).maybe_single().execute()
@@ -614,12 +743,36 @@ def employee_monthly_attendance_report(employee_id: str, month: str):
         )
         rows = att_resp.data or []
 
+        leave_resp = (
+            supabase_admin.table("leave_requests")
+            .select("start_date, end_date")
+            .eq("employee_id", employee_id)
+            .eq("status", "Approved")
+            .lte("start_date", end.isoformat())
+            .gte("end_date", start.isoformat())
+            .execute()
+        )
+        leave_dates = _leave_dates_in_range(leave_resp.data, start, end)
+
+        days = _build_month_days(
+            start,
+            end,
+            rows,
+            leave_dates,
+            bool(employee.get("works_saturday")),
+            bool(employee.get("alternate_saturday")),
+            _holidays_in_range(start, end),
+        )
+
         data = {
             "employee": employee,
             "month": month,
             "from_date": start.isoformat(),
             "to_date": end.isoformat(),
             "records": rows,
+            # Every date of the month with its day_type (Record / Leave /
+            # Holiday / Off) -- this is what the Excel export iterates over.
+            "days": days,
             "summary": {
                 "present_days": sum(1 for r in rows if r.get("status") == "Present"),
                 "half_days": sum(1 for r in rows if r.get("status") == "Half Day"),
@@ -637,6 +790,84 @@ def employee_monthly_attendance_report(employee_id: str, month: str):
 
         return success_response(
             message="Employee monthly attendance fetched successfully", data=data
+        )
+
+    except HTTPException:
+
+        raise
+
+    except Exception as e:
+
+        raise HTTPException(500, str(e))
+
+
+# =========================
+# ALL EMPLOYEES — MONTHLY ATTENDANCE (full calendar)
+# =========================
+# Powers the Attendance tab's month-only Excel download: every employee,
+# every date of the month (see FULL-CALENDAR HELPERS above).
+
+
+def all_employees_monthly_attendance_report(month: str):
+
+    try:
+
+        start, end = _month_bounds(month)
+
+        employees = _fetch_all(
+            lambda: supabase_admin.table("employees")
+            .select("id, full_name, employee_id, works_saturday, alternate_saturday")
+            .order("full_name")
+        )
+
+        attendance = _fetch_all(
+            lambda: supabase_admin.table("attendance")
+            .select("*")
+            .gte("attendance_date", start.isoformat())
+            .lte("attendance_date", end.isoformat())
+            .order("attendance_date")
+        )
+
+        leaves = _fetch_all(
+            lambda: supabase_admin.table("leave_requests")
+            .select("employee_id, start_date, end_date")
+            .eq("status", "Approved")
+            .lte("start_date", end.isoformat())
+            .gte("end_date", start.isoformat())
+        )
+
+        holidays = _holidays_in_range(start, end)
+
+        att_by_emp, leave_by_emp = {}, {}
+        for r in attendance:
+            att_by_emp.setdefault(r.get("employee_id"), []).append(r)
+        for r in leaves:
+            leave_by_emp.setdefault(r.get("employee_id"), []).append(r)
+
+        result = []
+        for emp in employees:
+            emp_id = emp["id"]
+            result.append(
+                {
+                    "employee": {
+                        "full_name": emp.get("full_name"),
+                        "employee_id": emp.get("employee_id"),
+                    },
+                    "days": _build_month_days(
+                        start,
+                        end,
+                        att_by_emp.get(emp_id, []),
+                        _leave_dates_in_range(leave_by_emp.get(emp_id, []), start, end),
+                        bool(emp.get("works_saturday")),
+                        bool(emp.get("alternate_saturday")),
+                        holidays,
+                    ),
+                }
+            )
+
+        return success_response(
+            message="Monthly attendance for all employees fetched successfully",
+            data={"month": month, "employees": result},
         )
 
     except HTTPException:
