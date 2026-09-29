@@ -268,14 +268,17 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
         # id lookup and returns None (not an error) when there's no
         # linked employee row, which the nullable assigned_by column
         # accepts fine.
-        assign_employee_leave_tier(
-            employee_data["id"],
-            ANNUAL_LEAVE,
-            str(data.annual_leave_tier_id),
-            assigned_by=get_employee_id_for_auth_user(
-                getattr(current_user, "id", None)
-            ),
-        )
+        # Annual Leave tier is optional at creation; HR can assign it
+        # later via Edit User.
+        if data.annual_leave_tier_id:
+            assign_employee_leave_tier(
+                employee_data["id"],
+                ANNUAL_LEAVE,
+                str(data.annual_leave_tier_id),
+                assigned_by=get_employee_id_for_auth_user(
+                    getattr(current_user, "id", None)
+                ),
+            )
 
         if data.childcare_leave_tier_id:
             childcare_type = get_leave_type_or_404(CHILDCARE_LEAVE)

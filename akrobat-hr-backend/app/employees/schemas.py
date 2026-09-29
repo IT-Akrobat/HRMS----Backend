@@ -93,7 +93,7 @@ class EmployeeCreate(BaseModel):
     # the employee passes the CHILDCARE LEAVE eligibility rules
     # (married); the create flow silently ignores it otherwise rather
     # than erroring, since the UI only shows the field when eligible.
-    annual_leave_tier_id: UUID
+    annual_leave_tier_id: Optional[UUID] = None
 
     childcare_leave_tier_id: Optional[UUID] = None
 
