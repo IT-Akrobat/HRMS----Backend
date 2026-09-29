@@ -314,3 +314,16 @@ alter table employee_site_assignments
 create index if not exists idx_site_assignments_missed
     on employee_site_assignments(employee_id)
     where is_missed = true;
+
+
+    -- Run once in Supabase -> SQL Editor
+alter table employees add column if not exists username text;
+
+-- One login username per employee, case-insensitive
+create unique index if not exists employees_username_lower_uidx
+  on employees (lower(username))
+  where username is not null;
+
+-- Example: give the installer his company login ID
+-- update employees set username = 'sakthi'
+--   where full_name ilike 'DETCHANAMURTHY SAKTHIVEL';

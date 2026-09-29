@@ -52,7 +52,7 @@ def login_user(username: str, password: str, request: Request = None):
     if len(matches) > 1:
         raise HTTPException(
             status_code=400,
-            detail="More than one account uses this name. Please contact HR.",
+            detail="More than one account uses this username. Please contact HR.",
         )
 
     employee = matches[0]

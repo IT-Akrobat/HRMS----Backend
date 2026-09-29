@@ -1,3 +1,4 @@
+import re
 from datetime import date, datetime
 from typing import Optional
 from uuid import UUID
@@ -17,6 +18,25 @@ class EmployeeCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     full_name: str = Field(..., min_length=2, max_length=100)
+
+    # Optional login username given by the company (e.g. "SAKTHI"). When
+    # blank the employee's full name is still used to log in.
+    username: Optional[str] = Field(default=None, max_length=50)
+
+    @field_validator("username", mode="before")
+    @classmethod
+    def _clean_username(cls, v):
+        if v is None:
+            return None
+        v = str(v).strip()
+        if not v:
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9._-]{2,50}", v):
+            raise ValueError(
+                "Username must be 2-50 characters: letters, numbers, dot, "
+                "underscore or hyphen (no spaces)."
+            )
+        return v
 
     # Optional. If left blank the employee is created with no email on
     # file (employees.email = NULL) and can log in with the employee code
@@ -159,6 +179,25 @@ class EmployeeUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     full_name: Optional[str] = Field(default=None, min_length=2, max_length=100)
+
+    # Optional login username given by the company (e.g. "SAKTHI"). When
+    # blank the employee's full name is still used to log in.
+    username: Optional[str] = Field(default=None, max_length=50)
+
+    @field_validator("username", mode="before")
+    @classmethod
+    def _clean_username(cls, v):
+        if v is None:
+            return None
+        v = str(v).strip()
+        if not v:
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9._-]{2,50}", v):
+            raise ValueError(
+                "Username must be 2-50 characters: letters, numbers, dot, "
+                "underscore or hyphen (no spaces)."
+            )
+        return v
 
     email: Optional[EmailStr] = None
 

@@ -135,10 +135,15 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
 
         # The Name entered here is the employee's login username, so it
         # must be unique (case-insensitive).
-        if username_taken(data.full_name):
+        login_name = data.username or data.full_name
+        if username_taken(login_name):
             conflict(
-                "This name is already used by another employee. Add a "
-                "surname or initial so each login name is unique."
+                "This login username is already used by another employee. "
+                "Choose a different username."
+                if data.username
+                else "This name is already used by another employee. Add a "
+                "surname or initial, or give the employee a unique login "
+                "username."
             )
 
         validate_reference("departments", data.department_id, "Department")
@@ -218,6 +223,7 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
             {
                 "employee_id": new_employee_id,
                 "full_name": data.full_name,
+                "username": data.username,
                 "email": employee_email,
                 "phone": data.phone,
                 "department_id": (
@@ -322,7 +328,8 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
             data={
                 **employee_data,
                 "login_employee_id": new_employee_id,
-                "login_username": employee_data["full_name"],
+                "login_username": employee_data.get("username")
+                or employee_data["full_name"],
                 "login_password": generated_password,
             },
         )
@@ -375,12 +382,26 @@ def update_employee(
             ):
                 conflict("Email already exists.")
 
-        if update_data.get("full_name") and username_taken(
-            update_data["full_name"], exclude_employee_id=employee_id
+        # Effective login after this edit: the username if one is (or is
+        # being) set, otherwise the full name.
+        new_username = (
+            update_data["username"]
+            if "username" in update_data
+            else existing_employee.get("username")
+        )
+        new_full_name = update_data.get("full_name") or existing_employee.get(
+            "full_name"
+        )
+        login_changed = ("username" in update_data) or (
+            not new_username and update_data.get("full_name")
+        )
+
+        if login_changed and username_taken(
+            new_username or new_full_name, exclude_employee_id=employee_id
         ):
             conflict(
-                "This name is already used by another employee. Add a "
-                "surname or initial so each login name is unique."
+                "This login is already used by another employee. Choose a "
+                "different username or name."
             )
 
         if "department_id" in update_data:

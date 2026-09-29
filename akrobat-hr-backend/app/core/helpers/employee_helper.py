@@ -208,25 +208,49 @@ def _like_escape(value: str) -> str:
 
 
 def find_employees_by_username(username: str) -> list[dict]:
-    """All employees whose full name matches `username` (normally 0 or 1)."""
+    """All employees who log in as `username` (normally 0 or 1).
+
+    An employee's login is their `username` column when HR set one
+    (e.g. "SAKTHI"); employees with no username still log in with their
+    full name, so existing accounts keep working.
+    """
 
     wanted = normalize_username(username)
 
     if not wanted:
         return []
 
-    response = (
+    pattern = _like_escape(wanted)
+    select = "id, employee_id, email, full_name, username"
+
+    by_username = (
         supabase_admin.table("employees")
-        .select("id, employee_id, email, full_name")
-        .ilike("full_name", _like_escape(wanted))
+        .select(select)
+        .ilike("username", pattern)
+        .execute()
+    )
+    by_name = (
+        supabase_admin.table("employees")
+        .select(select)
+        .ilike("full_name", pattern)
         .execute()
     )
 
-    return [
-        row
-        for row in (response.data or [])
-        if normalize_username(row.get("full_name")) == wanted
-    ]
+    found: dict[str, dict] = {}
+
+    for row in by_username.data or []:
+        if normalize_username(row.get("username")) == wanted:
+            found[row["id"]] = row
+
+    for row in by_name.data or []:
+        # Full name only counts as a login when no username is set.
+        if (
+            not row.get("username")
+            and normalize_username(row.get("full_name")) == wanted
+        ):
+            found[row["id"]] = row
+
+    return list(found.values())
 
 
 def username_taken(full_name: str, exclude_employee_id: str | None = None) -> bool:
