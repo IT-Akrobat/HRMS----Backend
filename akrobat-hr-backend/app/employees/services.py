@@ -16,6 +16,7 @@ from app.core.helpers.employee_helper import (
     validate_reference,
     get_employee_or_404,
     resolve_default_shift_id,
+    is_operation_project_manager,
     get_employee_id_for_auth_user,
     get_all_report_ids,
     is_field_employee,
@@ -189,7 +190,10 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
         # not left for the employee's first check-in to discover it's null.
         resolved_shift_id = str(data.shift_id) if data.shift_id else None
         if not resolved_shift_id and data.designation_id:
-            resolved_shift_id = resolve_default_shift_id(str(data.designation_id))
+            resolved_shift_id = resolve_default_shift_id(
+                str(data.designation_id),
+                str(data.role_id) if data.role_id else None,
+            )
 
         # Employee code is derived from the chosen department + designation
         # (AKR-HR-EXE-0001, AKR-FIN-0002, ...) and the login password is
@@ -412,6 +416,11 @@ def update_employee(
                 "departments", update_data["department_id"], "Department"
             )
 
+        # Remember the role/designation being saved BEFORE role_id is popped
+        # below — Operation Project Manager's default shift depends on both
+        # (MANAGER role -> Office hours, EMPLOYEE role -> Operation Site).
+        new_role_id = update_data.get("role_id")
+
         if "role_id" in update_data:
             validate_reference("roles", update_data["role_id"], "Role")
 
@@ -438,6 +447,39 @@ def update_employee(
 
         if "shift_id" in update_data:
             validate_reference("shifts", update_data["shift_id"], "Shift")
+        elif new_role_id or "designation_id" in update_data:
+            # Role or designation changed and HR didn't pick a shift by
+            # hand -> re-derive the default so e.g. Operation Project
+            # Manager switches to Office hours when made MANAGER (and
+            # back to Operation Site hours when made EMPLOYEE).
+            effective_designation_id = update_data.get(
+                "designation_id", existing_employee.get("designation_id")
+            )
+            effective_role_id = new_role_id
+            if not effective_role_id:
+                profile = (
+                    supabase_admin.table("user_profiles")
+                    .select("role_id")
+                    .eq("employee_id", employee_id)
+                    .maybe_single()
+                    .execute()
+                )
+                effective_role_id = (
+                    profile.data.get("role_id") if profile and profile.data else None
+                )
+            resolved_shift_id = resolve_default_shift_id(
+                str(effective_designation_id) if effective_designation_id else None,
+                str(effective_role_id) if effective_role_id else None,
+            )
+            # Only Operation Project Manager is role-dependent; for every
+            # other designation leave the employee's current shift alone so
+            # a hand-picked shift isn't overwritten by a role/designation edit.
+            if (
+                resolved_shift_id
+                and effective_designation_id
+                and is_operation_project_manager(str(effective_designation_id))
+            ):
+                update_data["shift_id"] = resolved_shift_id
 
         if "manager_id" in update_data:
             validate_reference("employees", update_data["manager_id"], "Manager")

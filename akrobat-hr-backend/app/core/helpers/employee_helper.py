@@ -326,7 +326,57 @@ def validate_reference(
 # ==========================================
 
 
-def resolve_default_shift_id(designation_id: str | None) -> str | None:
+# Operation "PROJECT MANAGER" works from the office when the login role is
+# MANAGER, so they get Office hours instead of the Operation Site hours
+# every other Operation designation (and a PROJECT MANAGER with the
+# EMPLOYEE role) keeps.
+MANAGER_OFFICE_SHIFT_NAME = "OFFICE - WEEKDAY (8:30-5:30)"
+
+
+def is_operation_project_manager(designation_id: str) -> bool:
+    """True if the designation is PROJECT MANAGER under the OPERATION* department."""
+
+    response = (
+        supabase_admin.table("designations")
+        .select("designation_name, departments(department_name)")
+        .eq("id", designation_id)
+        .maybe_single()
+        .execute()
+    )
+
+    if not response or not response.data:
+        return False
+
+    designation_name = (response.data.get("designation_name") or "").strip().upper()
+    department = response.data.get("departments") or {}
+    department_name = (department.get("department_name") or "").strip().upper()
+
+    return designation_name == "PROJECT MANAGER" and department_name.startswith(
+        "OPERATION"
+    )
+
+
+def _is_manager_role(role_id: str | None) -> bool:
+    if not role_id:
+        return False
+
+    response = (
+        supabase_admin.table("roles")
+        .select("role_name")
+        .eq("id", str(role_id))
+        .maybe_single()
+        .execute()
+    )
+
+    if not response or not response.data:
+        return False
+
+    return (response.data.get("role_name") or "").strip().upper() == "MANAGER"
+
+
+def resolve_default_shift_id(
+    designation_id: str | None, role_id: str | None = None
+) -> str | None:
     """
     "When creating a user, their working hours should be mentioned" —
     every designation is seeded with a `default_shift_id` (see
@@ -336,10 +386,27 @@ def resolve_default_shift_id(designation_id: str | None) -> str | None:
     didn't explicitly pass a shift_id, so HR can still hand-pick a
     different shift (e.g. the 9-6 Office variant) per employee — this
     is a suggestion/default, not a hard rule.
+
+    Exception: Operation > PROJECT MANAGER with the MANAGER role gets
+    Office hours (MANAGER_OFFICE_SHIFT_NAME). Same designation with the
+    EMPLOYEE role (or any other role) still gets the designation's
+    normal Operation Site default.
     """
 
     if not designation_id:
         return None
+
+    if is_operation_project_manager(designation_id) and _is_manager_role(role_id):
+        shift_response = (
+            supabase_admin.table("shifts")
+            .select("id")
+            .eq("shift_name", MANAGER_OFFICE_SHIFT_NAME)
+            .maybe_single()
+            .execute()
+        )
+
+        if shift_response and shift_response.data:
+            return shift_response.data["id"]
 
     response = (
         supabase_admin.table("designations")
