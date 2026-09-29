@@ -1,4 +1,5 @@
 import random
+import re
 import secrets
 import string
 
@@ -22,21 +23,16 @@ COMPANY_PREFIX = "AKR"
 
 
 # ==========================================
-# GENERATE EMPLOYEE ID (company + department + designation based)
+# GENERATE EMPLOYEE ID (short running number)
 # ==========================================
 #
-# Employee codes look like AKR-HR-EXE-0001 -- COMPANY_PREFIX, then the
-# department code (departments.department_code, e.g. HR/FIN/OPS -- see
-# sql/001_schema.sql seed data), then a short designation code derived
-# from designation_name (designations has no dedicated code column, so
-# initials are derived on the fly, e.g. "HR Executive" -> "HE",
-# "Manager" -> "MAN"), then a running numeric sequence zero-padded to 4
-# digits. The designation segment is only appended when the employee
-# has a designation -- an employee with just a department still gets
-# AKR-HR-0001. The sequence is scoped to everything already sharing the
-# same full prefix and falls forward on a collision (e.g. a deleted
-# employee freed up a lower number) so this can never return a
-# duplicate code.
+# Employee codes are now short: COMPANY_PREFIX + a running number
+# zero-padded to 4 digits -- AKR-0001, AKR-0002, ... The department and
+# designation are no longer part of the code, so it never needs to change
+# when someone is moved or promoted. Older codes such as
+# AKR-HR-EXE-0001 stay exactly as they are; only new employees get the
+# short format. The next number is one more than the highest existing
+# AKR-<number> code, so it can never collide with an existing code.
 
 
 def _department_prefix(department_id: str | None) -> str:
@@ -92,38 +88,37 @@ def generate_employee_id(
     department_id: str | None = None,
     designation_id: str | None = None,
 ) -> str:
+    # department_id / designation_id are accepted only so existing
+    # callers (create_employee, the code preview) keep working -- they
+    # no longer affect the code.
 
-    dept_code = _department_prefix(department_id)
-    desig_code = _designation_prefix(designation_id)
+    pattern = re.compile(rf"^{re.escape(COMPANY_PREFIX)}-(\d+)$", re.IGNORECASE)
 
-    prefix = (
-        f"{COMPANY_PREFIX}-{dept_code}-{desig_code}"
-        if desig_code
-        else f"{COMPANY_PREFIX}-{dept_code}"
-    )
-
-    # Every employee code that already starts with this exact
-    # department/designation prefix -- used to work out the next free
-    # sequence number.
-    existing = (
-        supabase_admin.table("employees")
-        .select("employee_id")
-        .ilike("employee_id", f"{prefix}-%")
-        .execute()
-    )
-
-    existing_ids = {row["employee_id"] for row in (existing.data or [])}
-
-    sequence = len(existing_ids) + 1
+    highest = 0
+    start, page_size = 0, 1000
 
     while True:
+        response = (
+            supabase_admin.table("employees")
+            .select("employee_id")
+            .ilike("employee_id", f"{COMPANY_PREFIX}-%")
+            .range(start, start + page_size - 1)
+            .execute()
+        )
 
-        employee_id = f"{prefix}-{sequence:04d}"
+        rows = response.data or []
 
-        if employee_id not in existing_ids:
-            return employee_id
+        for row in rows:
+            match = pattern.match(row.get("employee_id") or "")
+            if match:
+                highest = max(highest, int(match.group(1)))
 
-        sequence += 1
+        if len(rows) < page_size:
+            break
+
+        start += page_size
+
+    return f"{COMPANY_PREFIX}-{highest + 1:04d}"
 
 
 # ==========================================
