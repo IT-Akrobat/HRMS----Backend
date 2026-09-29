@@ -281,33 +281,43 @@ def get_attendance_trend_detail(days: int = 7, status: str = "onTime"):
                     continue
                 day_counts[emp_id] = day_counts.get(emp_id, 0) + 1
 
-        else:  # "absent" — present in the window neither via attendance nor leave
-            attendance_rows = (
-                supabase_admin.table("attendance")
-                .select("employee_id")
-                .gte("attendance_date", start.isoformat())
-                .lte("attendance_date", end.isoformat())
-                .execute()
-                .data
-                or []
-            )
-            present_counts = {}
-            for row in attendance_rows:
-                emp_id = row.get("employee_id")
-                if emp_id:
-                    present_counts[emp_id] = present_counts.get(emp_id, 0) + 1
+        else:  # "absent" -- employees with no attendance record and no
+            # approved leave TODAY (the latest day in the window). Each
+            # employee is counted once, so this matches the donut's
+            # "Absent" number and is a head-count, not a sum over days.
+            today_iso = end.isoformat()
 
-            leave_counts = leave_days_by_employee()
-
-            day_counts = {}
-            for emp_id in emp_by_id:
-                absent_days = (
-                    window_days
-                    - present_counts.get(emp_id, 0)
-                    - leave_counts.get(emp_id, 0)
+            present_today = {
+                row.get("employee_id")
+                for row in (
+                    supabase_admin.table("attendance")
+                    .select("employee_id")
+                    .eq("attendance_date", today_iso)
+                    .execute()
+                    .data
+                    or []
                 )
-                if absent_days > 0:
-                    day_counts[emp_id] = absent_days
+            }
+
+            on_leave_today = {
+                row.get("employee_id")
+                for row in (
+                    supabase_admin.table("leave_requests")
+                    .select("employee_id")
+                    .eq("status", "Approved")
+                    .lte("start_date", today_iso)
+                    .gte("end_date", today_iso)
+                    .execute()
+                    .data
+                    or []
+                )
+            }
+
+            day_counts = {
+                emp_id: 1
+                for emp_id in emp_by_id
+                if emp_id not in present_today and emp_id not in on_leave_today
+            }
 
         people = [
             person
