@@ -18,7 +18,7 @@ from app.core.database import supabase_admin
 from app.core.exceptions import bad_request, forbidden, unauthorized
 from app.core.database import supabase
 from app.core.helpers.employee_helper import (
-    get_employee_by_code,
+    find_employees_by_username,
     is_placeholder_email,
     placeholder_login_email,
 )
@@ -34,24 +34,33 @@ def _client_ip(request: Request | None) -> str | None:
     return get_client_ip(request)
 
 
-def login_user(employee_code: str, password: str, request: Request = None):
+def login_user(username: str, password: str, request: Request = None):
 
     # Supabase Auth authenticates by email under the hood, so the
-    # employee code typed into the login form is first resolved to the
-    # email + id on file for that employee (see
-    # app/core/helpers/employee_helper.get_employee_by_code). An unknown
-    # code gets the exact same "Invalid credentials" error as a wrong
-    # password, so login never reveals whether a given employee code
-    # exists.
-    employee = get_employee_by_code(employee_code)
+    # username typed into the login form (the employee's full name) is
+    # first resolved to the email + id on file for that employee (see
+    # app/core/helpers/employee_helper.find_employees_by_username). An
+    # unknown username gets the exact same "Invalid credentials" error as
+    # a wrong password, so login never reveals whether a name exists.
+    matches = find_employees_by_username(username)
 
-    if not employee:
+    if not matches:
         raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    # Names are kept unique when employees are created/edited, so this
+    # only happens for old records that already shared a name.
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="More than one account uses this name. Please contact HR.",
+        )
+
+    employee = matches[0]
 
     # Employees created without an email have employees.email = NULL;
     # their Supabase Auth login uses an internal placeholder derived from
     # the employee code (see employee_helper.placeholder_login_email).
-    email = employee.get("email") or placeholder_login_email(employee_code)
+    email = employee.get("email") or placeholder_login_email(employee["employee_id"])
     employee_id = employee["id"]
 
     access_control = get_access_control_settings()
@@ -111,7 +120,7 @@ def login_user(employee_code: str, password: str, request: Request = None):
         module="AUTH",
         action="LOGIN",
         performed_by=response.user.id if response.user else None,
-        description=f"Login: {employee_code}",
+        description=f"Login: {employee['full_name']}",
         request=request,
     )
 

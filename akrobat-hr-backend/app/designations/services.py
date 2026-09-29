@@ -9,11 +9,30 @@ def create_designation(data):
 
     try:
 
+        name = " ".join((data.designation_name or "").split())
+
+        if len(name) < 2:
+            raise HTTPException(status_code=400, detail="Designation name is required.")
+
+        clash = (
+            supabase_admin.table("designations")
+            .select("id")
+            .eq("department_id", data.department_id)
+            .ilike("designation_name", name.replace("%", "\\%").replace("_", "\\_"))
+            .execute()
+        )
+
+        if clash.data:
+            raise HTTPException(
+                status_code=409,
+                detail="This designation already exists in that department.",
+            )
+
         response = (
             supabase_admin.table("designations")
             .insert(
                 {
-                    "designation_name": data.designation_name,
+                    "designation_name": name,
                     "department_id": data.department_id,
                     "default_shift_id": data.default_shift_id,
                 }
@@ -22,6 +41,10 @@ def create_designation(data):
         )
 
         return response.data[0]
+
+    except HTTPException:
+
+        raise
 
     except Exception as e:
 

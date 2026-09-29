@@ -29,7 +29,7 @@ def login(data: LoginRequest, request: Request, response: Response):
     try:
 
         session_response, mfa_required, password_expired = login_user(
-            data.employee_code, data.password, request=request
+            data.username, data.password, request=request
         )
 
         # Tokens now go out as httpOnly cookies, never in the JSON body --

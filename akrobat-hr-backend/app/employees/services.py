@@ -20,6 +20,7 @@ from app.core.helpers.employee_helper import (
     get_all_report_ids,
     is_field_employee,
     placeholder_login_email,
+    username_taken,
 )
 from app.core.validators import validate_email
 from app.core.audit import record_audit_log
@@ -131,6 +132,14 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
         if data.email:
             validate_email(data.email)
             check_email_exists(data.email)
+
+        # The Name entered here is the employee's login username, so it
+        # must be unique (case-insensitive).
+        if username_taken(data.full_name):
+            conflict(
+                "This name is already used by another employee. Add a "
+                "surname or initial so each login name is unique."
+            )
 
         validate_reference("departments", data.department_id, "Department")
         validate_reference("designations", data.designation_id, "Designation")
@@ -313,6 +322,7 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
             data={
                 **employee_data,
                 "login_employee_id": new_employee_id,
+                "login_username": employee_data["full_name"],
                 "login_password": generated_password,
             },
         )
@@ -364,6 +374,14 @@ def update_employee(
                 != employee_id
             ):
                 conflict("Email already exists.")
+
+        if update_data.get("full_name") and username_taken(
+            update_data["full_name"], exclude_employee_id=employee_id
+        ):
+            conflict(
+                "This name is already used by another employee. Add a "
+                "surname or initial so each login name is unique."
+            )
 
         if "department_id" in update_data:
             validate_reference(

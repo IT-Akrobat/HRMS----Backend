@@ -189,56 +189,56 @@ def is_placeholder_email(email: str | None) -> bool:
 
 
 # ==========================================
-# LOOKUP EMAIL BY EMPLOYEE CODE (for login)
+# LOOKUP EMPLOYEE BY USERNAME (for login)
 # ==========================================
 #
-# The frontend login form now collects the human-readable employee code
-# (e.g. HR-0001) instead of an email address. Supabase Auth itself still
-# authenticates by email under the hood, so this resolves
-# employee_code -> the email on file for that employee, which
-# app/auth/services.py then hands to supabase.auth.sign_in_with_password.
-# Returns None (never raises) if the code doesn't exist, so the caller
-# can respond with a generic "invalid credentials" instead of
-# confirming/denying that a given employee code exists.
-def get_email_for_employee_code(employee_code: str) -> str | None:
-
-    if not employee_code:
-        return None
-
-    response = (
-        supabase_admin.table("employees")
-        .select("email")
-        .eq("employee_id", employee_code.strip().upper())
-        .maybe_single()
-        .execute()
-    )
-
-    if not response or not response.data:
-        return None
-
-    return response.data.get("email")
+# The login "username" is simply the employee's full name -- the same
+# value HR types into the Name field when creating the user. It is short
+# and easy to remember, unlike the generated employee code
+# (AKR-HR-EXE-0001). Matching is case-insensitive and ignores extra
+# spaces, so "priya  kumar" logs in as "Priya Kumar".
+#
+# Full names are only usable as usernames if they are unique, so
+# create_employee()/update_employee() reject a name already in use (see
+# username_taken below).
 
 
-def get_employee_by_code(employee_code: str) -> dict | None:
-    """Same lookup as get_email_for_employee_code, but also returns the
-    employees.id -- needed by login_user to key the login_lockouts table
-    (see app/access_control/services.py)."""
+def normalize_username(name: str | None) -> str:
+    return " ".join((name or "").split()).casefold()
 
-    if not employee_code:
-        return None
+
+def _like_escape(value: str) -> str:
+    # Stop % and _ typed in a name from acting as wildcards.
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def find_employees_by_username(username: str) -> list[dict]:
+    """All employees whose full name matches `username` (normally 0 or 1)."""
+
+    wanted = normalize_username(username)
+
+    if not wanted:
+        return []
 
     response = (
         supabase_admin.table("employees")
-        .select("id, email")
-        .eq("employee_id", employee_code.strip().upper())
-        .maybe_single()
+        .select("id, employee_id, email, full_name")
+        .ilike("full_name", _like_escape(wanted))
         .execute()
     )
 
-    if not response or not response.data:
-        return None
+    return [
+        row
+        for row in (response.data or [])
+        if normalize_username(row.get("full_name")) == wanted
+    ]
 
-    return response.data
+
+def username_taken(full_name: str, exclude_employee_id: str | None = None) -> bool:
+    return any(
+        row["id"] != exclude_employee_id
+        for row in find_employees_by_username(full_name)
+    )
 
 
 # ==========================================

@@ -5,11 +5,11 @@ from pydantic import BaseModel, EmailStr, Field
 
 class LoginRequest(BaseModel):
 
-    # Employees now sign in with their employee code (e.g. HR-0001)
-    # instead of an email address -- see app/auth/services.login_user,
-    # which resolves this to the email on file and authenticates
-    # against Supabase underneath.
-    employee_code: str = Field(..., min_length=1, max_length=50)
+    # Employees sign in with their username -- the name HR entered in
+    # the Name field when creating them (e.g. "Priya Kumar"). See
+    # app/auth/services.login_user, which resolves it to the email on
+    # file and authenticates against Supabase underneath.
+    username: str = Field(..., min_length=1, max_length=100)
 
     password: str
 

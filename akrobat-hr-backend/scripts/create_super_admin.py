@@ -174,11 +174,12 @@ def create_super_admin(
         print("Created user_profiles row -> role set to SUPER ADMIN.")
 
     print("\nDone. Log in with:")
-    print(f"  employee code: {resolved_code}")
-    print(f"  password:      {password}")
+    print(f"  username: {full_name or 'Super Admin'}")
+    print(f"  password: {password}")
     print(
-        "\n(Login is by employee code, not email -- the email above is only "
-        "what's on file for this account.)"
+        "\n(Login is by username -- the employee's full name -- not email. "
+        "If this account already existed, use the name saved on its "
+        "employees row.)"
     )
 
 
