@@ -230,12 +230,14 @@ def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
     works_saturday = False
     alternate_saturday = False
     is_operation_dept = False
+    saturday_shift_id = None
     if not shift:
         try:
             employee = (
                 supabase_admin.table("employees")
                 .select(
-                    "shift_id, works_saturday, alternate_saturday, shifts(*), "
+                    "shift_id, works_saturday, alternate_saturday, "
+                    "saturday_shift_id, shifts(*), "
                     "departments!employees_department_id_fkey(department_name)"
                 )
                 .eq("id", employee_id)
@@ -246,6 +248,7 @@ def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
                 shift = employee.data.get("shifts")
                 works_saturday = bool(employee.data.get("works_saturday"))
                 alternate_saturday = bool(employee.data.get("alternate_saturday"))
+                saturday_shift_id = employee.data.get("saturday_shift_id")
                 is_operation_dept = is_operation_department_name(
                     (employee.data.get("departments") or {}).get("department_name")
                 )
@@ -256,7 +259,7 @@ def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
             employee = (
                 supabase_admin.table("employees")
                 .select(
-                    "works_saturday, alternate_saturday, "
+                    "works_saturday, alternate_saturday, saturday_shift_id, "
                     "departments!employees_department_id_fkey(department_name)"
                 )
                 .eq("id", employee_id)
@@ -266,6 +269,7 @@ def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
             if employee and employee.data:
                 works_saturday = bool(employee.data.get("works_saturday"))
                 alternate_saturday = bool(employee.data.get("alternate_saturday"))
+                saturday_shift_id = employee.data.get("saturday_shift_id")
                 is_operation_dept = is_operation_department_name(
                     (employee.data.get("departments") or {}).get("department_name")
                 )
@@ -275,23 +279,29 @@ def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
     if not shift:
         return None
 
+    weekday_area = (shift.get("shift_name") or "").split(" - ")[0].strip().upper()
+
     # OPERATION department: every Saturday is a working day (no alternate
-    # Saturday), always on the Operation Saturday shift (8:00-3:30).
+    # Saturday). Operation Site staff are always on the Operation Saturday
+    # shift (8:00-3:30). An Operation Project Manager on OFFICE hours
+    # (MANAGER role) is still every-Saturday, but takes the Office
+    # Saturday timing chosen for them (below) instead.
     if is_operation_dept and for_date.weekday() == 5:
         works_saturday = True
         alternate_saturday = False
-        try:
-            operation_saturday = (
-                supabase_admin.table("shifts")
-                .select("*")
-                .ilike("shift_name", f"{OPERATION_SATURDAY_AREA}%SATURDAY%")
-                .limit(1)
-                .execute()
-            )
-            if operation_saturday.data:
-                return operation_saturday.data[0]
-        except Exception as e:
-            logger.error(f"Failed to resolve Operation Saturday shift: {e}")
+        if weekday_area.startswith(OPERATION_SATURDAY_AREA.split(" ")[0]):
+            try:
+                operation_saturday = (
+                    supabase_admin.table("shifts")
+                    .select("*")
+                    .ilike("shift_name", f"{OPERATION_SATURDAY_AREA}%SATURDAY%")
+                    .limit(1)
+                    .execute()
+                )
+                if operation_saturday.data:
+                    return operation_saturday.data[0]
+            except Exception as e:
+                logger.error(f"Failed to resolve Operation Saturday shift: {e}")
 
     if for_date.weekday() == 5 and not works_saturday:
         return None
@@ -304,19 +314,46 @@ def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
     ):
         return None
 
+    # Office-hours staff can be given one of two Saturday timings
+    # (9:00-12:00 or 8:30-12:30) -- employees.saturday_shift_id, sql/034.sql.
+    if for_date.weekday() == 5 and saturday_shift_id and weekday_area == "OFFICE":
+        try:
+            chosen = (
+                supabase_admin.table("shifts")
+                .select("*")
+                .eq("id", str(saturday_shift_id))
+                .limit(1)
+                .execute()
+            )
+            if chosen.data:
+                return chosen.data[0]
+        except Exception as e:
+            logger.error(f"Failed to resolve chosen Saturday shift: {e}")
+
     if (
         for_date.weekday() == 5
         and "SATURDAY" not in (shift.get("shift_name") or "").upper()
     ):
         try:
             area = shift["shift_name"].split(" - ")[0].strip()
+            # Exact "<AREA> - SATURDAY" first: the Office area now also has
+            # the two named Saturday-timing rows, which the wildcard below
+            # could otherwise pick up by accident.
             saturday_shift = (
                 supabase_admin.table("shifts")
                 .select("*")
-                .ilike("shift_name", f"{area}%SATURDAY%")
+                .eq("shift_name", f"{area} - SATURDAY")
                 .limit(1)
                 .execute()
             )
+            if not saturday_shift.data:
+                saturday_shift = (
+                    supabase_admin.table("shifts")
+                    .select("*")
+                    .ilike("shift_name", f"{area}%SATURDAY%")
+                    .limit(1)
+                    .execute()
+                )
             if saturday_shift.data:
                 shift = saturday_shift.data[0]
         except Exception as e:

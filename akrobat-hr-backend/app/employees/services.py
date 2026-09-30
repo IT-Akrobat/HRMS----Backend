@@ -261,6 +261,9 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
                 "working_days_per_week": data.working_days_per_week,
                 "works_saturday": works_saturday,
                 "alternate_saturday": alternate_saturday,
+                "saturday_shift_id": (
+                    str(data.saturday_shift_id) if data.saturday_shift_id else None
+                ),
             }
         )
 
@@ -467,6 +470,11 @@ def update_employee(
             update_data["works_saturday"] = True
             update_data["alternate_saturday"] = False
 
+        if update_data.get("saturday_shift_id"):
+            validate_reference(
+                "shifts", str(update_data["saturday_shift_id"]), "Saturday shift"
+            )
+
         if "shift_id" in update_data:
             validate_reference("shifts", update_data["shift_id"], "Shift")
         elif new_role_id or "designation_id" in update_data:
@@ -507,7 +515,13 @@ def update_employee(
             validate_reference("employees", update_data["manager_id"], "Manager")
 
         # UUID fields must be stringified for the Supabase client.
-        for key in ("department_id", "designation_id", "shift_id", "manager_id"):
+        for key in (
+            "department_id",
+            "designation_id",
+            "shift_id",
+            "saturday_shift_id",
+            "manager_id",
+        ):
             if key in update_data and update_data[key] is not None:
                 update_data[key] = str(update_data[key])
 

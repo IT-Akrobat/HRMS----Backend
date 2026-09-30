@@ -361,3 +361,34 @@ WHERE e.department_id = d.id
   AND UPPER(TRIM(d.department_name)) LIKE 'OPERATION%'
   AND (e.works_saturday IS DISTINCT FROM true
        OR e.alternate_saturday IS DISTINCT FROM false);
+
+
+
+       -- =====================================================================
+-- OFFICE-HOURS STAFF -- choice of Saturday timing
+-- =====================================================================
+-- Staff on Office weekday hours (8:30-5:30 / 9:00-6:00) -- including an
+-- Operation Project Manager with the MANAGER role -- can be given one of
+-- two Saturday timings:
+--     * 9:00 AM - 12:00 PM
+--     * 8:30 AM - 12:30 PM
+--
+-- employees.saturday_shift_id stores the chosen one. Deliberately a plain
+-- uuid with NO foreign key: a second employees -> shifts FK would make
+-- every `shifts(...)` embed on employees ambiguous in PostgREST.
+-- NULL = not chosen -> attendance falls back to the old single
+-- "OFFICE - SATURDAY" (8:30-12:00) row, so nothing changes for existing
+-- staff until HR picks one on the Edit User form.
+--
+-- Safe to re-run.
+-- =====================================================================
+
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS saturday_shift_id uuid;
+
+INSERT INTO shifts (shift_name, start_time, end_time, working_hours, break_duration, grace_period, status)
+SELECT 'OFFICE - SATURDAY (9:00-12:00)', '09:00', '12:00', 3, 0, 10, 'Active'
+WHERE NOT EXISTS (SELECT 1 FROM shifts WHERE shift_name = 'OFFICE - SATURDAY (9:00-12:00)');
+
+INSERT INTO shifts (shift_name, start_time, end_time, working_hours, break_duration, grace_period, status)
+SELECT 'OFFICE - SATURDAY (8:30-12:30)', '08:30', '12:30', 4, 0, 10, 'Active'
+WHERE NOT EXISTS (SELECT 1 FROM shifts WHERE shift_name = 'OFFICE - SATURDAY (8:30-12:30)');
