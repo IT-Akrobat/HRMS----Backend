@@ -17,7 +17,7 @@ from app.core.helpers.employee_helper import (
     get_employee_or_404,
     resolve_default_shift_id,
     is_operation_project_manager,
-    is_operation_department_id,
+    is_operation_every_saturday,
     get_employee_id_for_auth_user,
     get_all_report_ids,
     is_field_employee,
@@ -212,7 +212,10 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
         # form sent -- no "Alternate Saturday" option for them.
         works_saturday = data.works_saturday
         alternate_saturday = data.alternate_saturday
-        if data.department_id and is_operation_department_id(str(data.department_id)):
+        if data.department_id and is_operation_every_saturday(
+            str(data.department_id),
+            str(data.designation_id) if data.designation_id else None,
+        ):
             works_saturday = True
             alternate_saturday = False
 
@@ -461,11 +464,21 @@ def update_employee(
         # OPERATION department: works every Saturday (8:00 AM - 3:30 PM),
         # no alternate-Saturday pattern. Applies whenever the employee is
         # (or is being moved) in Operation, whatever the form sent.
+        # (Operation PROJECT MANAGER is exempt -- they keep the Works
+        # Saturdays + Alternate Saturday options.)
         effective_department_id = update_data.get(
             "department_id", existing_employee.get("department_id")
         )
-        if effective_department_id and is_operation_department_id(
-            str(effective_department_id)
+        effective_designation_for_sat = update_data.get(
+            "designation_id", existing_employee.get("designation_id")
+        )
+        if effective_department_id and is_operation_every_saturday(
+            str(effective_department_id),
+            (
+                str(effective_designation_for_sat)
+                if effective_designation_for_sat
+                else None
+            ),
         ):
             update_data["works_saturday"] = True
             update_data["alternate_saturday"] = False

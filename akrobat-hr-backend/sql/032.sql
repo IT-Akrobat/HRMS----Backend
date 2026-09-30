@@ -392,3 +392,111 @@ WHERE NOT EXISTS (SELECT 1 FROM shifts WHERE shift_name = 'OFFICE - SATURDAY (9:
 INSERT INTO shifts (shift_name, start_time, end_time, working_hours, break_duration, grace_period, status)
 SELECT 'OFFICE - SATURDAY (8:30-12:30)', '08:30', '12:30', 4, 0, 10, 'Active'
 WHERE NOT EXISTS (SELECT 1 FROM shifts WHERE shift_name = 'OFFICE - SATURDAY (8:30-12:30)');
+
+-- =====================================================================
+-- OPERATION DEPARTMENT -- Saturday timing 8:00 AM - 3:30 PM, every Saturday
+-- =====================================================================
+-- Rule: everyone in the OPERATION department works EVERY Saturday
+-- (no "Alternate Saturday / 1st & 3rd" pattern) from 8:00 AM to 3:30 PM.
+--
+-- 1. The Operation Saturday shift was 08:30-15:30 (sql/003). Change it to
+--    08:00-15:30 = 7.5 working hours (no separate Saturday break).
+-- 2. Backfill every existing Operation-department employee to
+--    works_saturday = true / alternate_saturday = false so attendance
+--    (late/overtime) and the monthly report treat every Saturday as a
+--    working day for them.
+--
+-- Safe to re-run (idempotent).
+-- =====================================================================
+
+UPDATE shifts
+SET start_time     = '08:00',
+    end_time       = '15:30',
+    working_hours  = 7.5,
+    break_duration = 0
+WHERE shift_name = 'OPERATION SITE - SATURDAY';
+
+-- Operation PROJECT MANAGER is excluded: they keep the Works Saturdays /
+-- Alternate Saturday (1st & 3rd) options like other departments.
+UPDATE employees e
+SET works_saturday    = true,
+    alternate_saturday = false
+FROM departments d
+LEFT JOIN designations des ON des.id = e.designation_id
+WHERE e.department_id = d.id
+  AND UPPER(TRIM(d.department_name)) LIKE 'OPERATION%'
+  AND UPPER(COALESCE(des.designation_name, '')) NOT LIKE '%PROJECT MANAGER%'
+  AND (e.works_saturday IS DISTINCT FROM true
+       OR e.alternate_saturday IS DISTINCT FROM false);
+       -- =====================================================================
+-- INSPECTION TEAM -- choice of weekday timing
+-- =====================================================================
+-- Inspection staff can now be put on either:
+--     * 8:00 AM - 4:30 PM
+--     * 8:30 AM - 5:30 PM
+-- (Create/Edit User form shows these as a dropdown.) The old single
+-- "INSPECTION SITE - WEEKDAY" (9:00-6:00) row is kept so existing
+-- employees on it keep working; nothing is changed for them until HR
+-- picks a new timing on the Edit form. Saturday ("INSPECTION SITE -
+-- SATURDAY") is unchanged.
+--
+-- 8.5h span - 1h lunch = 7.5 working hours for both.
+-- Safe to re-run.
+-- =====================================================================
+
+INSERT INTO shifts (shift_name, start_time, end_time, working_hours, break_duration, grace_period, status)
+SELECT 'INSPECTION SITE - WEEKDAY (8:00-4:30)', '08:00', '16:30', 7.5, 1, 10, 'Active'
+WHERE NOT EXISTS (SELECT 1 FROM shifts WHERE shift_name = 'INSPECTION SITE - WEEKDAY (8:00-4:30)');
+
+INSERT INTO shifts (shift_name, start_time, end_time, working_hours, break_duration, grace_period, status)
+SELECT 'INSPECTION SITE - WEEKDAY (8:30-5:30)', '08:30', '17:30', 7.5, 1, 10, 'Active'
+WHERE NOT EXISTS (SELECT 1 FROM shifts WHERE shift_name = 'INSPECTION SITE - WEEKDAY (8:30-5:30)');
+
+-- New Inspection hires default to 8:30-5:30 (HR can pick 8:00-4:30).
+UPDATE designations d
+SET default_shift_id = (
+    SELECT id FROM shifts WHERE shift_name = 'INSPECTION SITE - WEEKDAY (8:30-5:30)'
+)
+WHERE d.default_shift_id = (
+    SELECT id FROM shifts WHERE shift_name = 'INSPECTION SITE - WEEKDAY'
+);
+
+-- =====================================================================
+-- SATURDAY TIMING OPTIONS -- Inspection + Office (per Attendance_List sheet)
+-- =====================================================================
+-- Inspection staff can now pick a Saturday timing (employees.
+-- saturday_shift_id, same column Office staff already use):
+--     * 8:00 AM - 3:30 PM   (pairs with weekday 8:00-4:30)
+--     * 8:30 AM - 12:30 PM  (pairs with weekday 8:30-5:30)
+--     * 9:00 AM - 1:00 PM   (existing "INSPECTION SITE - SATURDAY",
+--                            pairs with weekday 9:00-6:00)
+-- Office staff get a third Saturday option: 8:30 AM - 12:00 PM.
+--
+-- grace_period is 0 on every new row (sql/022 zeroed it company-wide;
+-- rows inserted later must not bring the 10-minute grace back).
+-- Nothing changes for existing employees until HR picks a timing on the
+-- Edit User form: NULL saturday_shift_id still falls back to the old
+-- single "<AREA> - SATURDAY" row. Safe to re-run.
+-- =====================================================================
+
+INSERT INTO shifts (shift_name, start_time, end_time, working_hours, break_duration, grace_period, status)
+SELECT 'INSPECTION SITE - SATURDAY (8:00-3:30)', '08:00', '15:30', 7.5, 0, 0, 'Active'
+WHERE NOT EXISTS (SELECT 1 FROM shifts WHERE shift_name = 'INSPECTION SITE - SATURDAY (8:00-3:30)');
+
+INSERT INTO shifts (shift_name, start_time, end_time, working_hours, break_duration, grace_period, status)
+SELECT 'INSPECTION SITE - SATURDAY (8:30-12:30)', '08:30', '12:30', 4, 0, 0, 'Active'
+WHERE NOT EXISTS (SELECT 1 FROM shifts WHERE shift_name = 'INSPECTION SITE - SATURDAY (8:30-12:30)');
+
+INSERT INTO shifts (shift_name, start_time, end_time, working_hours, break_duration, grace_period, status)
+SELECT 'OFFICE - SATURDAY (8:30-12:00)', '08:30', '12:00', 3.5, 0, 0, 'Active'
+WHERE NOT EXISTS (SELECT 1 FROM shifts WHERE shift_name = 'OFFICE - SATURDAY (8:30-12:00)');
+
+-- Re-zero grace on the rows sql/034 + sql/035 inserted with 10 minutes.
+UPDATE shifts
+SET grace_period = 0
+WHERE shift_name IN (
+    'OFFICE - SATURDAY (9:00-12:00)',
+    'OFFICE - SATURDAY (8:30-12:30)',
+    'INSPECTION SITE - WEEKDAY (8:00-4:30)',
+    'INSPECTION SITE - WEEKDAY (8:30-5:30)'
+) AND grace_period <> 0;

@@ -18,7 +18,7 @@ from app.core.helpers.employee_helper import (
     get_all_report_ids,
     get_employee_ids_for_role,
     get_field_employee_ids,
-    is_operation_department_name,
+    is_operation_every_saturday_name,
     OPERATION_SATURDAY_AREA,
 )
 from app.core.constants import ADMIN
@@ -157,6 +157,11 @@ def _get_attendance_rule() -> dict:
     }
 
 
+# Areas (the part of shift_name before " - ") whose staff can pick their own
+# Saturday timing via employees.saturday_shift_id.
+SATURDAY_CHOICE_AREAS = ("OFFICE", "INSPECTION SITE")
+
+
 def _is_first_or_third_saturday(for_date: date) -> bool:
     """
     True if `for_date` (assumed to already be a Saturday) is the 1st or
@@ -193,8 +198,9 @@ def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
          deliberately skip the SATURDAY sibling lookup below and return
          None instead of silently applying the area's Saturday hours to
          everyone.
-      6. OPERATION department override: everyone in Operation works EVERY
-         Saturday, 8:00 AM - 3:30 PM ("OPERATION SITE - SATURDAY" shift,
+      6. OPERATION department override: everyone in Operation (except
+         PROJECT MANAGER, who keeps the Works Saturdays / Alternate Saturday
+         options) works EVERY Saturday, 8:00 AM - 3:30 PM ("OPERATION SITE - SATURDAY" shift,
          sql/033.sql). works_saturday is treated as true and
          alternate_saturday is ignored, and the Operation Saturday shift is
          used even if their weekday shift is a different area's (e.g. an
@@ -238,6 +244,7 @@ def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
                 .select(
                     "shift_id, works_saturday, alternate_saturday, "
                     "saturday_shift_id, shifts(*), "
+                    "designations(designation_name), "
                     "departments!employees_department_id_fkey(department_name)"
                 )
                 .eq("id", employee_id)
@@ -249,8 +256,9 @@ def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
                 works_saturday = bool(employee.data.get("works_saturday"))
                 alternate_saturday = bool(employee.data.get("alternate_saturday"))
                 saturday_shift_id = employee.data.get("saturday_shift_id")
-                is_operation_dept = is_operation_department_name(
-                    (employee.data.get("departments") or {}).get("department_name")
+                is_operation_dept = is_operation_every_saturday_name(
+                    (employee.data.get("departments") or {}).get("department_name"),
+                    (employee.data.get("designations") or {}).get("designation_name"),
                 )
         except Exception as e:
             logger.error(f"Failed to fetch default shift for {employee_id}: {e}")
@@ -260,6 +268,7 @@ def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
                 supabase_admin.table("employees")
                 .select(
                     "works_saturday, alternate_saturday, saturday_shift_id, "
+                    "designations(designation_name), "
                     "departments!employees_department_id_fkey(department_name)"
                 )
                 .eq("id", employee_id)
@@ -270,8 +279,9 @@ def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
                 works_saturday = bool(employee.data.get("works_saturday"))
                 alternate_saturday = bool(employee.data.get("alternate_saturday"))
                 saturday_shift_id = employee.data.get("saturday_shift_id")
-                is_operation_dept = is_operation_department_name(
-                    (employee.data.get("departments") or {}).get("department_name")
+                is_operation_dept = is_operation_every_saturday_name(
+                    (employee.data.get("departments") or {}).get("department_name"),
+                    (employee.data.get("designations") or {}).get("designation_name"),
                 )
         except Exception as e:
             logger.error(f"Failed to fetch works_saturday for {employee_id}: {e}")
@@ -314,9 +324,18 @@ def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
     ):
         return None
 
-    # Office-hours staff can be given one of two Saturday timings
-    # (9:00-12:00 or 8:30-12:30) -- employees.saturday_shift_id, sql/034.sql.
-    if for_date.weekday() == 5 and saturday_shift_id and weekday_area == "OFFICE":
+    # Office-hours AND Inspection staff can be given a chosen Saturday
+    # timing -- employees.saturday_shift_id (sql/034.sql, sql/036.sql).
+    #   OFFICE     : 9:00-12:00 / 8:30-12:30 / 8:30-12:00
+    #   INSPECTION : 8:00-3:30 / 8:30-12:30 / 9:00-1:00
+    # The chosen shift is only honoured if it belongs to the same area as
+    # the employee's weekday shift, so a stale id left over from a
+    # department/timing change can never apply another area's hours.
+    if (
+        for_date.weekday() == 5
+        and saturday_shift_id
+        and weekday_area in SATURDAY_CHOICE_AREAS
+    ):
         try:
             chosen = (
                 supabase_admin.table("shifts")
@@ -326,7 +345,9 @@ def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
                 .execute()
             )
             if chosen.data:
-                return chosen.data[0]
+                chosen_name = (chosen.data[0].get("shift_name") or "").upper()
+                if chosen_name.startswith(weekday_area) and "SATURDAY" in chosen_name:
+                    return chosen.data[0]
         except Exception as e:
             logger.error(f"Failed to resolve chosen Saturday shift: {e}")
 

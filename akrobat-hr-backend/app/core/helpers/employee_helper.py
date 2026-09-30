@@ -366,6 +366,45 @@ def is_operation_department_name(department_name: str | None) -> bool:
     return (department_name or "").strip().upper().startswith("OPERATION")
 
 
+def is_project_manager_designation_name(designation_name: str | None) -> bool:
+    return "PROJECT MANAGER" in (designation_name or "").strip().upper()
+
+
+def is_operation_every_saturday_name(
+    department_name: str | None, designation_name: str | None
+) -> bool:
+    """
+    Operation staff who work EVERY Saturday (no alternate-Saturday option).
+    Operation PROJECT MANAGER is the exception: they keep the Works Saturdays
+    Yes/No + Alternate Saturday (1st & 3rd) options like other departments.
+    """
+    return is_operation_department_name(
+        department_name
+    ) and not is_project_manager_designation_name(designation_name)
+
+
+def is_operation_every_saturday(
+    department_id: str | None, designation_id: str | None
+) -> bool:
+    """ID-based version of is_operation_every_saturday_name()."""
+
+    if not is_operation_department_id(department_id):
+        return False
+
+    if not designation_id:
+        return True
+
+    response = (
+        supabase_admin.table("designations")
+        .select("designation_name")
+        .eq("id", str(designation_id))
+        .maybe_single()
+        .execute()
+    )
+    name = response.data.get("designation_name") if response and response.data else None
+    return not is_project_manager_designation_name(name)
+
+
 def is_operation_department_id(department_id: str | None) -> bool:
     """True if `department_id` is the OPERATION* department."""
 

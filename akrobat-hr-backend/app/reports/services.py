@@ -4,7 +4,7 @@ from fastapi import HTTPException
 
 from app.core.database import supabase_admin
 from app.core.responses import success_response
-from app.core.helpers.employee_helper import is_operation_department_name
+from app.core.helpers.employee_helper import is_operation_every_saturday_name
 
 
 def _tenure(joining_date):
@@ -609,10 +609,14 @@ def _saturday_flags(emp: dict) -> tuple[bool, bool]:
     """
     (works_saturday, alternate_saturday) for an employees row. OPERATION
     department staff work EVERY Saturday (8:00-3:30) -- no alternate
-    Saturday -- regardless of what the stored flags say.
+    Saturday -- regardless of what the stored flags say. Operation PROJECT
+    MANAGER is exempt and follows their own stored flags.
     """
     dept = emp.get("departments") or {}
-    if is_operation_department_name(dept.get("department_name")):
+    desig = emp.get("designations") or {}
+    if is_operation_every_saturday_name(
+        dept.get("department_name"), desig.get("designation_name")
+    ):
         return True, False
     return bool(emp.get("works_saturday")), bool(emp.get("alternate_saturday"))
 
@@ -832,7 +836,8 @@ def all_employees_monthly_attendance_report(month: str):
             lambda: supabase_admin.table("employees")
             .select(
                 "id, full_name, employee_id, works_saturday, alternate_saturday, "
-                "departments!employees_department_id_fkey(department_name)"
+                "departments!employees_department_id_fkey(department_name), "
+                "designations(designation_name)"
             )
             .order("full_name")
         )
