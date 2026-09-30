@@ -582,7 +582,7 @@ def employee_full_report(employee_id: str):
 #   "Leave"  -- employee has an Approved leave covering that date
 #   "Off"    -- Sunday, or a Saturday this employee doesn't work
 #               (works_saturday = false, or alternate_saturday = true
-#               and it isn't the 1st/3rd Saturday) -> export leaves the
+#               and it isn't the 2nd/4th Saturday) -> export leaves the
 #               whole row empty (date only)
 # A day on which the employee actually checked in always stays a
 # "Record", so real work is never hidden by these rules. Priority when
@@ -590,8 +590,8 @@ def employee_full_report(employee_id: str):
 # holiday just shows as the holiday).
 
 
-def _is_first_or_third_saturday(d: date) -> bool:
-    return ((d.day - 1) // 7 + 1) in (1, 3)
+def _is_second_or_fourth_saturday(d: date) -> bool:
+    return ((d.day - 1) // 7 + 1) in (2, 4)
 
 
 def _is_off_day(d: date, works_saturday: bool, alternate_saturday: bool) -> bool:
@@ -600,7 +600,7 @@ def _is_off_day(d: date, works_saturday: bool, alternate_saturday: bool) -> bool
     if d.weekday() == 5:  # Saturday -- depends on the employee
         if not works_saturday:
             return True
-        if alternate_saturday and not _is_first_or_third_saturday(d):
+        if alternate_saturday and not _is_second_or_fourth_saturday(d):
             return True
     return False
 

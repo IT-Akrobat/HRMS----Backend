@@ -118,7 +118,7 @@ class EmployeeCreate(BaseModel):
     # payroll working_days_per_week figure above.
     works_saturday: bool = Field(default=False)
 
-    # Alternate Saturday schedule (works only the 1st & 3rd Saturday of
+    # Alternate Saturday schedule (works only the 2nd & 4th Saturday of
     # the month) -- a second, independent flag alongside works_saturday
     # rather than a redesign of it, so the existing Yes/No toggle and
     # its downstream logic stay exactly as they were. Only meaningful

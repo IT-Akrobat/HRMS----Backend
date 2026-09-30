@@ -358,7 +358,7 @@ def is_operation_project_manager(designation_id: str) -> bool:
 
 # Everyone in the OPERATION department works EVERY Saturday, 8:00 AM - 3:30 PM
 # (shift row "OPERATION SITE - SATURDAY", see sql/033.sql). The "Alternate
-# Saturday (1st & 3rd)" option does not apply to them.
+# Saturday (2nd & 4th)" option does not apply to them.
 OPERATION_SATURDAY_AREA = "OPERATION SITE"
 
 
@@ -376,7 +376,7 @@ def is_operation_every_saturday_name(
     """
     Operation staff who work EVERY Saturday (no alternate-Saturday option).
     Operation PROJECT MANAGER is the exception: they keep the Works Saturdays
-    Yes/No + Alternate Saturday (1st & 3rd) options like other departments.
+    Yes/No + Alternate Saturday (2nd & 4th) options like other departments.
     """
     return is_operation_department_name(
         department_name
