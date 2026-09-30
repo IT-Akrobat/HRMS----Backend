@@ -18,12 +18,23 @@ from app.locations.mappls_service import is_in_india, reverse_geocode_in
 
 from app.core.security import get_current_user
 from app.core.responses import success_response
+from app.core.constants import HR
+from app.core.exceptions import forbidden
+from app.core.permissions import get_role_name_for_auth_user
 
 router = APIRouter(prefix="/locations", tags=["Locations"])
 
 
+def _block_hr_site_changes(user):
+    """HR can view sites (dropdowns, dashboards) but cannot create, edit
+    or delete them -- that's Super Admin / Manager only."""
+    if (get_role_name_for_auth_user(user.id) or "").strip().upper() == HR:
+        forbidden("HR is not allowed to create, edit or delete sites.")
+
+
 @router.post("/")
 def create(data: CreateLocationRequest, user=Depends(get_current_user)):
+    _block_hr_site_changes(user)
 
     return create_location(data)
 
@@ -78,11 +89,13 @@ def one_location(location_id: str, user=Depends(get_current_user)):
 
 @router.put("/{location_id}")
 def update(location_id: str, data: dict, user=Depends(get_current_user)):
+    _block_hr_site_changes(user)
 
     return update_location(location_id, data)
 
 
 @router.delete("/{location_id}")
 def delete(location_id: str, user=Depends(get_current_user)):
+    _block_hr_site_changes(user)
 
     return delete_location(location_id)
