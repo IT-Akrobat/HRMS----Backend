@@ -356,6 +356,36 @@ def is_operation_project_manager(designation_id: str) -> bool:
     )
 
 
+# Everyone in the OPERATION department works EVERY Saturday, 8:00 AM - 3:30 PM
+# (shift row "OPERATION SITE - SATURDAY", see sql/033.sql). The "Alternate
+# Saturday (1st & 3rd)" option does not apply to them.
+OPERATION_SATURDAY_AREA = "OPERATION SITE"
+
+
+def is_operation_department_name(department_name: str | None) -> bool:
+    return (department_name or "").strip().upper().startswith("OPERATION")
+
+
+def is_operation_department_id(department_id: str | None) -> bool:
+    """True if `department_id` is the OPERATION* department."""
+
+    if not department_id:
+        return False
+
+    response = (
+        supabase_admin.table("departments")
+        .select("department_name")
+        .eq("id", str(department_id))
+        .maybe_single()
+        .execute()
+    )
+
+    if not response or not response.data:
+        return False
+
+    return is_operation_department_name(response.data.get("department_name"))
+
+
 def _is_manager_role(role_id: str | None) -> bool:
     if not role_id:
         return False

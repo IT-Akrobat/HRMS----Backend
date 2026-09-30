@@ -327,3 +327,37 @@ create unique index if not exists employees_username_lower_uidx
 -- Example: give the installer his company login ID
 -- update employees set username = 'sakthi'
 --   where full_name ilike 'DETCHANAMURTHY SAKTHIVEL';
+
+
+
+-- =====================================================================
+-- OPERATION DEPARTMENT -- Saturday timing 8:00 AM - 3:30 PM, every Saturday
+-- =====================================================================
+-- Rule: everyone in the OPERATION department works EVERY Saturday
+-- (no "Alternate Saturday / 1st & 3rd" pattern) from 8:00 AM to 3:30 PM.
+--
+-- 1. The Operation Saturday shift was 08:30-15:30 (sql/003). Change it to
+--    08:00-15:30 = 7.5 working hours (no separate Saturday break).
+-- 2. Backfill every existing Operation-department employee to
+--    works_saturday = true / alternate_saturday = false so attendance
+--    (late/overtime) and the monthly report treat every Saturday as a
+--    working day for them.
+--
+-- Safe to re-run (idempotent).
+-- =====================================================================
+
+UPDATE shifts
+SET start_time     = '08:00',
+    end_time       = '15:30',
+    working_hours  = 7.5,
+    break_duration = 0
+WHERE shift_name = 'OPERATION SITE - SATURDAY';
+
+UPDATE employees e
+SET works_saturday    = true,
+    alternate_saturday = false
+FROM departments d
+WHERE e.department_id = d.id
+  AND UPPER(TRIM(d.department_name)) LIKE 'OPERATION%'
+  AND (e.works_saturday IS DISTINCT FROM true
+       OR e.alternate_saturday IS DISTINCT FROM false);

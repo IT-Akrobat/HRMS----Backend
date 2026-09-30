@@ -17,6 +17,7 @@ from app.core.helpers.employee_helper import (
     get_employee_or_404,
     resolve_default_shift_id,
     is_operation_project_manager,
+    is_operation_department_id,
     get_employee_id_for_auth_user,
     get_all_report_ids,
     is_field_employee,
@@ -206,6 +207,15 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
         )
         generated_password = generate_temp_password()
 
+        # OPERATION department: every Saturday is a working day (8:00 AM -
+        # 3:30 PM), so the Saturday flags are fixed regardless of what the
+        # form sent -- no "Alternate Saturday" option for them.
+        works_saturday = data.works_saturday
+        alternate_saturday = data.alternate_saturday
+        if data.department_id and is_operation_department_id(str(data.department_id)):
+            works_saturday = True
+            alternate_saturday = False
+
         # employees.email: the real email, or None if none was given.
         employee_email = data.email or None
         # Supabase Auth always needs an email to create the login, so an
@@ -249,8 +259,8 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
                 "marital_status": data.marital_status,
                 "nationality": data.nationality,
                 "working_days_per_week": data.working_days_per_week,
-                "works_saturday": data.works_saturday,
-                "alternate_saturday": data.alternate_saturday,
+                "works_saturday": works_saturday,
+                "alternate_saturday": alternate_saturday,
             }
         )
 
@@ -444,6 +454,18 @@ def update_employee(
         # Same story as the tier ids above -- not an employees column,
         # applied separately via employee_leave_overrides after update.
         chennai_leave_default = update_data.pop("chennai_leave_default", None)
+
+        # OPERATION department: works every Saturday (8:00 AM - 3:30 PM),
+        # no alternate-Saturday pattern. Applies whenever the employee is
+        # (or is being moved) in Operation, whatever the form sent.
+        effective_department_id = update_data.get(
+            "department_id", existing_employee.get("department_id")
+        )
+        if effective_department_id and is_operation_department_id(
+            str(effective_department_id)
+        ):
+            update_data["works_saturday"] = True
+            update_data["alternate_saturday"] = False
 
         if "shift_id" in update_data:
             validate_reference("shifts", update_data["shift_id"], "Shift")
