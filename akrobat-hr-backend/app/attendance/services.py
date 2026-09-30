@@ -162,15 +162,15 @@ def _get_attendance_rule() -> dict:
 SATURDAY_CHOICE_AREAS = ("OFFICE", "INSPECTION SITE")
 
 
-def _is_first_or_third_saturday(for_date: date) -> bool:
+def _is_second_or_fourth_saturday(for_date: date) -> bool:
     """
-    True if `for_date` (assumed to already be a Saturday) is the 1st or
-    3rd Saturday of its month -- the "Alternate Saturday" pattern
+    True if `for_date` (assumed to already be a Saturday) is the 2nd or
+    4th Saturday of its month -- the "Alternate Saturday" pattern
     (employees.alternate_saturday), i.e. this employee works 2
     Saturdays a month instead of every Saturday or none.
     """
     nth = (for_date.day - 1) // 7 + 1
-    return nth in (1, 3)
+    return nth in (2, 4)
 
 
 def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
@@ -205,9 +205,9 @@ def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
          alternate_saturday is ignored, and the Operation Saturday shift is
          used even if their weekday shift is a different area's (e.g. an
          Operation Project Manager on Office hours).
-      5. If employees.alternate_saturday is also true (the "1st & 3rd
+      5. If employees.alternate_saturday is also true (the "2nd & 4th
          Saturday" option on the Create/Edit User form), step 3 is
-         further narrowed to only the month's 1st and 3rd Saturdays —
+         further narrowed to only the month's 2nd and 4th Saturdays —
          every other Saturday, this employee is off, same as
          works_saturday == False. Doesn't affect anyone with
          alternate_saturday left at its default (false).
@@ -320,7 +320,7 @@ def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
         for_date.weekday() == 5
         and works_saturday
         and alternate_saturday
-        and not _is_first_or_third_saturday(for_date)
+        and not _is_second_or_fourth_saturday(for_date)
     ):
         return None
 
