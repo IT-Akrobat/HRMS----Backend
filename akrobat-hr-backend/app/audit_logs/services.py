@@ -308,7 +308,7 @@ AUDIT_LOG_SELECT = "*, employees(full_name, employee_id, profile_photo, work_loc
 # check-in/out spot itself is in Chennai (address / coordinates).
 # Every other location's entries are returned exactly as before.
 # The label shown instead of the real location:
-_DISPLAY_LABEL = "CHN-RKM | NGB-AKR | PIN-600034"
+_DISPLAY_LABEL = "Rajkamal, Nungambakkam, Chennai - 600006"
 
 
 def _get_display_label() -> str:
