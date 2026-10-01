@@ -12,6 +12,38 @@ from app.core.helpers.employee_helper import get_employee_id_for_auth_user
 from app.notifications.services import notify_employee
 from app.notification_preferences.services import get_preference
 
+# Country calendars are stored as short codes ('SG', 'IN'), but rows can
+# arrive spelled out ("India", "SINGAPORE") from an uploaded Excel sheet
+# or an older import. An exact-match filter on the code then silently
+# drops those rows, so the holiday simply never shows up for that
+# country. Normalize on the way in, and match every known spelling on
+# the way out (which also covers rows already stored the long way).
+_COUNTRY_ALIASES = {
+    "IN": {"IN", "IND", "INDIA", "INDIAN"},
+    "SG": {"SG", "SGP", "SINGAPORE", "SINGAPOREAN"},
+}
+
+
+def _normalize_country(value, default: str = "SG") -> str:
+    text = str(value or "").strip().upper()
+    if not text:
+        return default
+    for code, names in _COUNTRY_ALIASES.items():
+        if text in names:
+            return code
+    return text
+
+
+def _country_variants(country: str) -> list[str]:
+    code = _normalize_country(country)
+    names = _COUNTRY_ALIASES.get(code)
+    if not names:
+        return [country]
+    variants = set()
+    for n in names:
+        variants.update({n, n.title(), n.lower()})
+    return sorted(variants)
+
 
 def _apply_sunday_shift(raw_date: date) -> tuple[date, bool]:
     """
@@ -161,7 +193,7 @@ def import_holidays_from_excel(file: UploadFile, default_country: str = "SG"):
         description = cell(row, "description")
         description = str(description).strip() if description else None
         country = cell(row, "country")
-        country = str(country).strip().upper() if country else default_country
+        country = _normalize_country(country, default_country)
 
         observed_date, was_shifted = _apply_sunday_shift(raw_date)
         rows_to_insert.append(
@@ -208,7 +240,7 @@ def create_holiday(data):
                     "holiday_name": data.holiday_name,
                     "holiday_date": data.holiday_date,
                     "description": data.description,
-                    "country": data.country,
+                    "country": _normalize_country(data.country),
                 }
             )
             .execute()
@@ -247,7 +279,7 @@ def bulk_import_holidays(items):
                     "raw_holiday_date": str(item.raw_holiday_date),
                     "is_sunday_shifted": was_shifted,
                     "description": item.description,
-                    "country": item.country,
+                    "country": _normalize_country(item.country),
                 }
             )
 
@@ -270,7 +302,11 @@ def get_saturday_holidays(country: str = "SG", year: int | None = None):
     app/leaves/policy_services.py credit_replacement_leave().
     """
 
-    query = supabase_admin.table("holidays").select("*").eq("country", country)
+    query = (
+        supabase_admin.table("holidays")
+        .select("*")
+        .in_("country", _country_variants(country))
+    )
 
     if year:
         query = query.gte("holiday_date", f"{year}-01-01").lte(
@@ -299,7 +335,7 @@ def get_holidays(country=None):
     query = supabase_admin.table("holidays").select("*")
 
     if country:
-        query = query.eq("country", country)
+        query = query.in_("country", _country_variants(country))
 
     response = query.order("holiday_date").execute()
 

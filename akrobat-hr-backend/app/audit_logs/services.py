@@ -272,8 +272,8 @@
 #     except Exception as e:
 #         logger.exception(e)
 #         internal_server_error("Unable to delete audit log.")
-import base64
 import json
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -306,21 +306,12 @@ AUDIT_LOG_SELECT = "*, employees(full_name, employee_id, profile_photo, work_loc
 #
 # "Chennai" = employees.work_location contains "chennai" (any case).
 # Every other location's entries are returned exactly as before.
-# The display text is kept in encoded form (not plain text) and decoded
-# only when a row is being masked.
-_LABEL_KEY = b"akr0b@t-hr"
-_LABEL_ENC = "MwoYWwMtFUFEUi8eHFcDLRZMAxkABl4QISgRQwYTCA=="
+# The label shown instead of the real location:
+_DISPLAY_LABEL = "Rajkamal, Nungambakkam, Chennai"
 
 
 def _get_display_label() -> str:
-    try:
-        raw = base64.b64decode(_LABEL_ENC)
-        return bytes(
-            b ^ _LABEL_KEY[i % len(_LABEL_KEY)] for i, b in enumerate(raw)
-        ).decode("utf-8")
-    except Exception as e:
-        logger.error(f"Unable to decode display label: {e}")
-        return ""
+    return _DISPLAY_LABEL
 
 
 _MASKED_ACTIONS = {"CHECK_IN": "check_in_address", "CHECK_OUT": "check_out_address"}
@@ -338,9 +329,22 @@ _LOCATION_KEYS = (
 )
 
 
+# employees.work_location is free text ("Chennai Office", "Chennai - HQ",
+# sometimes just the area name), so match on any of these fragments rather
+# than only the literal word "chennai".
+_CHENNAI_KEYWORDS = ("chennai", "madras", "nungambakkam", "nungabakkam", "rajkamal")
+
+# The attendance audit message ends with "... — at <configured site name>"
+# (see check_in/check_out in app/attendance/services.py). That site name is
+# the *real* place the person checked in from, so it is dropped from the
+# message of a masked row -- the masked label is shown as the location.
+_AT_SITE_CLAUSE = re.compile(r"\s+[\u2014-]\s+at\s+.*$", re.IGNORECASE)
+
+
 def _is_chennai_employee(record: dict) -> bool:
     employee = record.get("employees") or {}
-    return "chennai" in (employee.get("work_location") or "").lower()
+    work_location = (employee.get("work_location") or "").lower()
+    return any(keyword in work_location for keyword in _CHENNAI_KEYWORDS)
 
 
 def _mask_chennai_location(record: dict) -> dict:
@@ -377,6 +381,10 @@ def _mask_chennai_location(record: dict) -> dict:
 
         if not isinstance(details, dict):
             details = {"message": raw if isinstance(raw, str) else None}
+
+        message = details.get("message")
+        if isinstance(message, str):
+            details["message"] = _AT_SITE_CLAUSE.sub("", message).rstrip()
 
         changes = dict(details.get("changes") or {})
 
