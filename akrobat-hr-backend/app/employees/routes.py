@@ -21,6 +21,7 @@ from app.employees.services import (
     update_my_profile,
     delete_employee,
     get_my_team_employees,
+    get_employee_directory,
     preview_employee_code,
 )
 
@@ -112,6 +113,15 @@ def get_employees_route(
 # result to exactly the calling manager's own reporting line — same
 # convention as GET /leaves/team and GET /attendance/team. Any signed-in
 # user can call it; if they have no reports, they just get an empty list.
+
+
+@router.get("/directory")
+def get_employee_directory_route(user=Depends(get_current_user)):
+    # Safe, read-only name/department/designation list for every signed-in
+    # user (Employee role's "All Employees" + "My Department" pages).
+    # Declared above any "/{employee_id}"-style route so "directory" is
+    # never captured as a path param.
+    return get_employee_directory()
 
 
 @router.get("/my-team")

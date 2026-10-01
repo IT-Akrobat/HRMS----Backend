@@ -613,6 +613,73 @@ def get_action_logs(action: str, page: int = 1, limit: int = 50):
 
 
 # ==========================================
+# DATE-RANGE FILTERED LOGS (Audit Logs calendar filter)
+# ==========================================
+#
+# `start` / `end` are ISO datetimes (the frontend sends the user's local
+# day converted to UTC, so "Oct 1" means Oct 1 in the viewer's timezone,
+# not UTC). Can be combined with a module, or one/more actions (comma
+# separated, same as get_action_logs). SupabaseRepository.list() only
+# supports .eq() filters, so this goes straight to supabase_admin.
+
+
+def get_logs_in_range(
+    page: int = 1,
+    limit: int = 50,
+    module: Optional[str] = None,
+    action: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+):
+    try:
+        from app.core.database import supabase_admin
+
+        size = max(min(limit, 200), 1)
+        range_start = (max(page, 1) - 1) * size
+        range_end = range_start + size - 1
+
+        query = supabase_admin.table("audit_logs").select(
+            AUDIT_LOG_SELECT, count="exact"
+        )
+
+        if module:
+            query = query.eq("module", module)
+
+        if action:
+            actions = [a.strip() for a in action.split(",") if a.strip()]
+            if len(actions) > 1:
+                query = query.in_("action", actions)
+            elif actions:
+                query = query.eq("action", actions[0])
+
+        if start:
+            query = query.gte("created_at", start)
+        if end:
+            query = query.lt("created_at", end)
+
+        response = (
+            query.order("created_at", desc=True).range(range_start, range_end).execute()
+        )
+
+        return success_response(
+            message="Audit logs fetched successfully.",
+            data={
+                "records": _mask_records(response.data or []),
+                "total": response.count or 0,
+                "page": page,
+                "limit": limit,
+            },
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception(e)
+        internal_server_error("Unable to fetch audit logs.")
+
+
+# ==========================================
 # LOGS BY DATE
 # ==========================================
 

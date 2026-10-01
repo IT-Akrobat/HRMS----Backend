@@ -8,7 +8,7 @@ from app.core.responses import success_response
 from app.core.logger import logger
 from app.core.exceptions import internal_server_error, conflict, bad_request
 from app.core.messages import EMPLOYEE_CREATED, EMPLOYEE_UPDATED, EMPLOYEE_DELETED
-from app.core.constants import ADMIN
+from app.core.constants import ACTIVE, ADMIN
 from app.core.helpers.employee_helper import (
     generate_employee_id,
     generate_temp_password,
@@ -830,3 +830,53 @@ def get_my_team_employees(auth_user_id: str):
     except Exception as e:
         logger.exception(e)
         internal_server_error("Unable to fetch team.")
+
+
+# ==========================================
+# EMPLOYEE DIRECTORY (any signed-in user)
+# ==========================================
+#
+# Read-only, "who works where" view for the Employee role's
+# "All Employees" / "My Department" pages. GET /employees/ is gated by
+# VIEW_EMPLOYEE and returns full records (salary-adjacent fields, DOB,
+# phone, email...), so it can't be opened up to everyone. This returns
+# ONLY non-sensitive "main details" -- name, employee code, photo,
+# designation, department, work location, work email, phone, joining date --
+# and only for Active employees.
+
+DIRECTORY_SELECT = """
+    id,
+    employee_id,
+    full_name,
+    profile_photo,
+    work_location,
+    email,
+    phone,
+    joining_date,
+    department_id,
+    departments!employees_department_id_fkey(id, department_name),
+    designations(id, designation_name)
+"""
+
+
+def get_employee_directory():
+    try:
+        response = (
+            supabase_admin.table("employees")
+            .select(DIRECTORY_SELECT)
+            .eq("employment_status", ACTIVE)
+            .order("full_name")
+            .execute()
+        )
+
+        return success_response(
+            message="Directory fetched successfully.",
+            data=response.data or [],
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception(e)
+        internal_server_error("Unable to fetch employee directory.")

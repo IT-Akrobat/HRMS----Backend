@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import APIRouter, Depends, Query, Request
 
 from app.audit_logs.schemas import CreateAuditLogRequest
@@ -10,6 +12,7 @@ from app.audit_logs.services import (
     get_module_logs,
     get_action_logs,
     get_logs_by_date,
+    get_logs_in_range,
     delete_audit_log,
 )
 
@@ -41,8 +44,12 @@ def create(
 def get_all(
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=200),
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
     user=Depends(require_permission("VIEW_AUDIT_LOGS")),
 ):
+    if start or end:
+        return get_logs_in_range(page=page, limit=limit, start=start, end=end)
     return get_audit_logs(page=page, limit=limit)
 
 
@@ -67,8 +74,14 @@ def module_logs(
     module: str,
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=200),
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
     user=Depends(require_permission("VIEW_AUDIT_LOGS")),
 ):
+    if start or end:
+        return get_logs_in_range(
+            page=page, limit=limit, module=module, start=start, end=end
+        )
     return get_module_logs(module, page=page, limit=limit)
 
 
@@ -77,8 +90,14 @@ def action_logs(
     action: str,
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=200),
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
     user=Depends(require_permission("VIEW_AUDIT_LOGS")),
 ):
+    if start or end:
+        return get_logs_in_range(
+            page=page, limit=limit, action=action, start=start, end=end
+        )
     return get_action_logs(action, page=page, limit=limit)
 
 
