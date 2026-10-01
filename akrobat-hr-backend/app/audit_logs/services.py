@@ -304,7 +304,8 @@ AUDIT_LOG_SELECT = "*, employees(full_name, employee_id, profile_photo, work_loc
 # (the frontends only live-geocode when coordinates are present, so
 # removing them also stops a re-geocode from revealing the real spot).
 #
-# "Chennai" = employees.work_location contains "chennai" (any case).
+# A row is masked when the employee's Work Location says Chennai, OR the
+# check-in/out spot itself is in Chennai (address / coordinates).
 # Every other location's entries are returned exactly as before.
 # The label shown instead of the real location:
 _DISPLAY_LABEL = "Rajkamal, Nungambakkam, Chennai"
@@ -347,20 +348,60 @@ def _is_chennai_employee(record: dict) -> bool:
     return any(keyword in work_location for keyword in _CHENNAI_KEYWORDS)
 
 
+# Rough box around Greater Chennai, used when a row has coordinates but no
+# readable address.
+_CHENNAI_BBOX = (12.80, 13.30, 79.95, 80.40)  # lat_min, lat_max, lon_min, lon_max
+
+
+def _unwrap(value):
+    """audit `changes` values are {"old": ..., "new": ...} pairs."""
+    if isinstance(value, dict) and "new" in value:
+        return value["new"]
+    return value
+
+
+def _is_chennai_checkin_point(changes: dict) -> bool:
+    """True when the stored check-in/out spot itself is in Chennai (its
+    address mentions Chennai/Madras, or its coordinates fall inside the
+    Chennai box) -- covers Chennai staff whose Work Location field was
+    left blank or typed differently."""
+
+    for key in ("check_in_address", "check_out_address", "address"):
+        text = _unwrap(changes.get(key))
+        if isinstance(text, str) and any(
+            word in text.lower() for word in ("chennai", "madras")
+        ):
+            return True
+
+    lat_min, lat_max, lon_min, lon_max = _CHENNAI_BBOX
+    for lat_key, lon_key in (
+        ("check_in_latitude", "check_in_longitude"),
+        ("check_out_latitude", "check_out_longitude"),
+        ("latitude", "longitude"),
+    ):
+        try:
+            lat = float(_unwrap(changes.get(lat_key)))
+            lon = float(_unwrap(changes.get(lon_key)))
+        except (TypeError, ValueError):
+            continue
+        if lat_min <= lat <= lat_max and lon_min <= lon <= lon_max:
+            return True
+
+    return False
+
+
 def _mask_chennai_location(record: dict) -> dict:
     """Return `record` with its location replaced by the Chennai label
-    when it is a Chennai employee's ATTENDANCE check-in/out. Never raises
-    -- on anything unexpected the record is returned as it was."""
+    when it is a Chennai ATTENDANCE check-in/out -- either the employee's
+    Work Location says Chennai, or the check-in/out spot itself is in
+    Chennai. Never raises -- on anything unexpected the record is
+    returned as it was."""
 
     try:
         action = (record.get("action") or "").upper()
         address_key = _MASKED_ACTIONS.get(action)
 
-        if (
-            not address_key
-            or (record.get("module") or "").upper() != "ATTENDANCE"
-            or not _is_chennai_employee(record)
-        ):
+        if not address_key or (record.get("module") or "").upper() != "ATTENDANCE":
             return record
 
         label = _get_display_label()
@@ -382,11 +423,14 @@ def _mask_chennai_location(record: dict) -> dict:
         if not isinstance(details, dict):
             details = {"message": raw if isinstance(raw, str) else None}
 
+        changes = dict(details.get("changes") or {})
+
+        if not (_is_chennai_employee(record) or _is_chennai_checkin_point(changes)):
+            return record
+
         message = details.get("message")
         if isinstance(message, str):
             details["message"] = _AT_SITE_CLAUSE.sub("", message).rstrip()
-
-        changes = dict(details.get("changes") or {})
 
         for key in _LOCATION_KEYS:
             changes.pop(key, None)
