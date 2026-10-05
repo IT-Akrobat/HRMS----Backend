@@ -10,6 +10,35 @@ from app.core.database import supabase_admin
 from app.core.config import PEXELS_API_KEY, PEXELS_SEARCH_QUERY, QUOTE_API_URL
 from app.core.logger import logger
 
+# Same "today" the attendance module files check-ins under (company-local
+# calendar day), so the dashboard's Today/Week/Month windows line up with
+# the attendance_date values actually stored.
+from app.attendance.services import _today_in_company_tz
+
+_PAGE_SIZE = 1000
+
+
+def _fetch_all(build_query) -> list:
+    """Return EVERY row a query matches.
+
+    Supabase/PostgREST silently caps a single response at 1000 rows. The
+    Week/Month trend windows (employees x days) can exceed that, and the
+    rows that get cut off are whichever employees sort last -- so those
+    people simply vanished from Present / Late / On Leave counts and from
+    the click-through lists. `build_query` must return a FRESH query each
+    call (a builder can't be re-ranged after execute()).
+    """
+    rows: list = []
+    offset = 0
+    while True:
+        batch = (
+            build_query().range(offset, offset + _PAGE_SIZE - 1).execute().data or []
+        )
+        rows.extend(batch)
+        if len(batch) < _PAGE_SIZE:
+            return rows
+        offset += _PAGE_SIZE
+
 
 def get_admin_dashboard():
 
@@ -96,36 +125,32 @@ def get_attendance_trend(days: int = 7):
 
     try:
 
-        end = date.today()
+        end = _today_in_company_tz()
 
         start = end - timedelta(days=days - 1)
 
         total_employees = len(
-            supabase_admin.table("employees").select("id").execute().data or []
+            _fetch_all(lambda: supabase_admin.table("employees").select("id"))
         )
 
-        attendance_rows = (
-            supabase_admin.table("attendance")
+        attendance_rows = _fetch_all(
+            lambda: supabase_admin.table("attendance")
             .select("attendance_date, late_minutes")
             .gte("attendance_date", start.isoformat())
             .lte("attendance_date", end.isoformat())
-            .execute()
-            .data
-            or []
+            .order("id")
         )
 
         # A leave counts for a given day if that day falls inside its
         # start_date/end_date range — same table/fix as get_admin_dashboard
         # above (real table is "leave_requests", not "leaves").
-        leave_rows = (
-            supabase_admin.table("leave_requests")
+        leave_rows = _fetch_all(
+            lambda: supabase_admin.table("leave_requests")
             .select("start_date, end_date")
             .eq("status", "Approved")
             .lte("start_date", end.isoformat())
             .gte("end_date", start.isoformat())
-            .execute()
-            .data
-            or []
+            .order("id")
         )
 
         buckets = {}
@@ -201,19 +226,17 @@ def get_attendance_trend_detail(days: int = 7, status: str = "onTime"):
 
     try:
 
-        end = date.today()
+        end = _today_in_company_tz()
         start = end - timedelta(days=days - 1)
         window_days = (end - start).days + 1
 
-        employees = (
-            supabase_admin.table("employees")
+        employees = _fetch_all(
+            lambda: supabase_admin.table("employees")
             .select(
                 "id, full_name, employee_id, profile_photo, "
                 "departments!employees_department_id_fkey(department_name)"
             )
-            .execute()
-            .data
-            or []
+            .order("id")
         )
         emp_by_id = {e["id"]: e for e in employees}
 
@@ -231,15 +254,13 @@ def get_attendance_trend_detail(days: int = 7, status: str = "onTime"):
             }
 
         def leave_days_by_employee():
-            leave_rows = (
-                supabase_admin.table("leave_requests")
+            leave_rows = _fetch_all(
+                lambda: supabase_admin.table("leave_requests")
                 .select("employee_id, start_date, end_date")
                 .eq("status", "Approved")
                 .lte("start_date", end.isoformat())
                 .gte("end_date", start.isoformat())
-                .execute()
-                .data
-                or []
+                .order("id")
             )
             counts = {}
             for row in leave_rows:
@@ -262,14 +283,12 @@ def get_attendance_trend_detail(days: int = 7, status: str = "onTime"):
             day_counts = leave_days_by_employee()
 
         elif status in ("onTime", "late"):
-            attendance_rows = (
-                supabase_admin.table("attendance")
+            attendance_rows = _fetch_all(
+                lambda: supabase_admin.table("attendance")
                 .select("employee_id, late_minutes")
                 .gte("attendance_date", start.isoformat())
                 .lte("attendance_date", end.isoformat())
-                .execute()
-                .data
-                or []
+                .order("id")
             )
             day_counts = {}
             for row in attendance_rows:
@@ -289,27 +308,23 @@ def get_attendance_trend_detail(days: int = 7, status: str = "onTime"):
 
             present_today = {
                 row.get("employee_id")
-                for row in (
-                    supabase_admin.table("attendance")
+                for row in _fetch_all(
+                    lambda: supabase_admin.table("attendance")
                     .select("employee_id")
                     .eq("attendance_date", today_iso)
-                    .execute()
-                    .data
-                    or []
+                    .order("id")
                 )
             }
 
             on_leave_today = {
                 row.get("employee_id")
-                for row in (
-                    supabase_admin.table("leave_requests")
+                for row in _fetch_all(
+                    lambda: supabase_admin.table("leave_requests")
                     .select("employee_id")
                     .eq("status", "Approved")
                     .lte("start_date", today_iso)
                     .gte("end_date", today_iso)
-                    .execute()
-                    .data
-                    or []
+                    .order("id")
                 )
             }
 

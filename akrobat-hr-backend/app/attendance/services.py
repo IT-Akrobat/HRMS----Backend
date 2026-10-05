@@ -1,4 +1,5 @@
 import math
+import re
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -101,6 +102,65 @@ def _get_company_timezone() -> ZoneInfo:
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+# --------------------------------------------------------------------------
+# PER-EMPLOYEE TIMEZONE
+#
+# `settings.timezone` is ONE company-wide value, but Akrobat has staff in
+# both Singapore (UTC+8) and India (UTC+5:30), and a shift's start_time
+# ("09:00") means 9 AM on the wall clock of wherever that employee is.
+# Judging everyone against the single company zone meant one country's
+# staff were measured against the wrong clock: with the company set to
+# India, a Singapore employee checking in at 09:20 SGT (01:20 UTC) was
+# compared against 09:00 IST (03:30 UTC) -- i.e. "early by 2h10m" -- so
+# they were NEVER recorded as late and never appeared in the dashboard's
+# Late list (the reverse happens when the company is set to Singapore).
+#
+# So lateness / scheduled-time maths now resolves the zone per employee,
+# from their profile, in this order:
+#   1. work_location  (where they physically work -- free text)
+#   2. nationality    (the HR-set country picker)
+#   3. the company timezone from Settings (previous behaviour)
+# Matching is a loose "mentions the country" check, same approach as the
+# holiday card used, so "Singapore", "Singaporean" and "SINGAPORE " all
+# resolve the same way.
+# --------------------------------------------------------------------------
+_COUNTRY_TIMEZONE_HINTS = (
+    (re.compile(r"singapore|singaporean", re.I), "Asia/Singapore"),
+    (re.compile(r"india|indian", re.I), "Asia/Kolkata"),
+)
+
+
+def _timezone_from_profile(work_location, nationality) -> Optional[ZoneInfo]:
+    for text in (work_location, nationality):
+        text = str(text or "")
+        for pattern, zone_name in _COUNTRY_TIMEZONE_HINTS:
+            if pattern.search(text):
+                return ZoneInfo(zone_name)
+    return None
+
+
+def _get_employee_timezone(employee_id: str) -> ZoneInfo:
+    """Timezone this employee's shift times are authored in (see above)."""
+    try:
+        row = (
+            supabase_admin.table("employees")
+            .select("work_location, nationality")
+            .eq("id", employee_id)
+            .maybe_single()
+            .execute()
+        )
+        if row and row.data:
+            zone = _timezone_from_profile(
+                row.data.get("work_location"), row.data.get("nationality")
+            )
+            if zone:
+                return zone
+    except Exception as e:
+        logger.error(f"Failed to resolve timezone for employee {employee_id}: {e}")
+
+    return _get_company_timezone()
 
 
 # Every "today = date.today()" in this file used to mean "today according
@@ -680,7 +740,7 @@ def check_in(auth_user_id: str, data, request: Optional[Request] = None):
         check_in_time = _now_utc()
         shift = _get_employee_shift(employee_id, today)
         rule = _get_attendance_rule()
-        company_tz = _get_company_timezone()
+        company_tz = _get_employee_timezone(employee_id)
         late_minutes = _late_minutes(check_in_time, today, shift, rule, tz=company_tz)
 
         payload = {
@@ -1066,7 +1126,7 @@ def get_attendance_reminder_status(auth_user_id: str):
             )
 
         hh, mm, *_ = str(shift["start_time"]).split(":")
-        company_tz = _get_company_timezone()
+        company_tz = _get_employee_timezone(employee_id)
         scheduled_start_local = datetime.combine(
             today, time(int(hh), int(mm)), tzinfo=company_tz
         )
@@ -1234,7 +1294,7 @@ def get_checkout_reminder_status(auth_user_id: str):
             )
 
         hh, mm, *_ = str(shift["end_time"]).split(":")
-        company_tz = _get_company_timezone()
+        company_tz = _get_employee_timezone(employee_id)
         scheduled_end_local = datetime.combine(
             today, time(int(hh), int(mm)), tzinfo=company_tz
         )
@@ -2250,7 +2310,7 @@ def _get_missed_site_assignments(employee_id: str, today: date) -> list[dict]:
         return already_missed
 
     hh, mm, *_ = str(shift["end_time"]).split(":")
-    company_tz = _get_company_timezone()
+    company_tz = _get_employee_timezone(employee_id)
     scheduled_end_local = datetime.combine(
         today, time(int(hh), int(mm)), tzinfo=company_tz
     )
