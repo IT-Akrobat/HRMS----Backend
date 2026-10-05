@@ -75,6 +75,7 @@ class MeProfile(BaseModel):
     manager: Optional[Any] = None
     shift: Optional[Any] = None
     work_location: Optional[str] = None
+    working_location: Optional[str] = None
 
     date_of_birth: Optional[str] = None
     gender: Optional[str] = None

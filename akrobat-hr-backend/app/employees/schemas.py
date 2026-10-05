@@ -9,6 +9,27 @@ from app.core.constants import ACTIVE
 
 WORKING_DAYS_PER_WEEK_OPTIONS = (5, 5.5, 6)
 
+# "Working Location" -- where the employee works from. Distinct from the
+# free-text `work_location` (city/office name used for timezone + holiday
+# detection). Stored in employees.working_location (see sql/035.sql).
+WORKING_LOCATION_OPTIONS = ("Office", "Site", "Office and Site")
+
+
+def _clean_working_location(v):
+    if v is None:
+        return None
+    v = str(v).strip()
+    if not v:
+        return None
+    # Case-insensitive match, stored in canonical casing.
+    for option in WORKING_LOCATION_OPTIONS:
+        if v.lower() == option.lower():
+            return option
+    raise ValueError(
+        "working_location must be one of: " + ", ".join(WORKING_LOCATION_OPTIONS)
+    )
+
+
 # ==========================================
 # Create Employee
 # ==========================================
@@ -73,6 +94,13 @@ class EmployeeCreate(BaseModel):
     employment_status: str = ACTIVE
 
     work_location: Optional[str] = Field(default=None, max_length=150)
+
+    working_location: Optional[str] = None
+
+    @field_validator("working_location", mode="before")
+    @classmethod
+    def _validate_working_location(cls, v):
+        return _clean_working_location(v)
 
     profile_photo: Optional[str] = None
 
@@ -221,6 +249,13 @@ class EmployeeUpdate(BaseModel):
 
     work_location: Optional[str] = Field(default=None, max_length=150)
 
+    working_location: Optional[str] = None
+
+    @field_validator("working_location", mode="before")
+    @classmethod
+    def _validate_working_location(cls, v):
+        return _clean_working_location(v)
+
     profile_photo: Optional[str] = None
 
     gender: Optional[str] = Field(default=None, max_length=20)
@@ -282,6 +317,7 @@ class EmployeeResponse(BaseModel):
     employment_status: str
 
     work_location: Optional[str]
+    working_location: Optional[str] = None
     profile_photo: Optional[str]
 
     created_at: Optional[datetime]

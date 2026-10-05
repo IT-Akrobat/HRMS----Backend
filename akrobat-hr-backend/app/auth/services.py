@@ -330,6 +330,7 @@ def get_me(auth_user) -> dict:
             religion,
             address,
             work_location,
+            working_location,
             manager_id,
             outdoor_checkin_enabled,
 
@@ -441,6 +442,7 @@ def get_me(auth_user) -> dict:
             # panel (which queries the employees table directly with the
             # same joins) showed the real values for the same person.
             "work_location": employee.get("work_location"),
+            "working_location": employee.get("working_location"),
             "manager": manager,
             "shift": employee.get("shifts"),
             "date_of_birth": (

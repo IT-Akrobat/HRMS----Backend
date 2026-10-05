@@ -256,6 +256,7 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
                 ),
                 "employment_status": data.employment_status,
                 "work_location": data.work_location,
+                "working_location": data.working_location,
                 "shift_id": resolved_shift_id,
                 "profile_photo": data.profile_photo,
                 "gender": data.gender,

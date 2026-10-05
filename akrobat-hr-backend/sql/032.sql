@@ -500,3 +500,24 @@ WHERE shift_name IN (
     'INSPECTION SITE - WEEKDAY (8:00-4:30)',
     'INSPECTION SITE - WEEKDAY (8:30-5:30)'
 ) AND grace_period <> 0;
+
+
+-- =====================================================================
+-- EMPLOYEES -- "Working Location" (Office / Site / Office and Site)
+-- =====================================================================
+-- New field on Create User / Edit User. Separate from the existing
+-- free-text employees.work_location (city/office name used for
+-- timezone + holiday detection), which is left untouched.
+--
+-- NULL = not set (existing employees stay blank until HR fills it in).
+
+alter table employees
+    add column if not exists working_location text;
+
+alter table employees
+    drop constraint if exists employees_working_location_check;
+
+alter table employees
+    add constraint employees_working_location_check
+    check (working_location is null
+           or working_location in ('Office', 'Site', 'Office and Site'));
