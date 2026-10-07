@@ -26,6 +26,7 @@ from app.core.constants import ADMIN
 from app.core.database import supabase_admin
 from app.core import realtime
 from app.notifications.services import notify_employee
+from app.attendance.ot import compute_ot
 
 attendance_repo = SupabaseRepository("attendance")
 correction_repo = SupabaseRepository("attendance_corrections")
@@ -895,6 +896,11 @@ def _as_naive_utc(value) -> datetime:
     return dt
 
 
+# Auto-deduct the standard shift break only when the day is at least this
+# long (gross, minutes) -- otherwise the employee left before lunch.
+AUTO_BREAK_MIN_GROSS_MINUTES = 300
+
+
 def _compute_checkout_fields(
     employee_id: str,
     attendance_date,
@@ -930,10 +936,28 @@ def _compute_checkout_fields(
         check_out_time = check_out_time + timedelta(days=1)
 
     gross_minutes = int((check_out_time - check_in_time).total_seconds() / 60)
-    working_minutes = max(0, gross_minutes - (break_minutes or 0))
 
     shift = _get_employee_shift(employee_id, attendance_date)
     rule = _get_attendance_rule()
+
+    # Standard break (shift.break_duration, in hours -- 1h on weekday
+    # shifts, 0 on Saturday shifts). If the employee forgot to press
+    # Break Start/End (no break recorded at all), deduct the standard
+    # break so the lunch hour isn't counted as working time. If any
+    # break was recorded, only that actual time is deducted. Skipped
+    # for very short days (employee left before lunch).
+    effective_break_minutes = break_minutes or 0
+    standard_break_minutes = (
+        int(float(shift.get("break_duration") or 0) * 60) if shift else 0
+    )
+    if (
+        standard_break_minutes
+        and gross_minutes >= AUTO_BREAK_MIN_GROSS_MINUTES
+        and effective_break_minutes == 0
+    ):
+        effective_break_minutes = standard_break_minutes
+
+    working_minutes = max(0, gross_minutes - effective_break_minutes)
     minimum_work_minutes = _minimum_work_minutes(shift, rule)
     overtime_after_minutes = rule.get("overtime_after_minutes") or minimum_work_minutes
 
@@ -948,6 +972,7 @@ def _compute_checkout_fields(
         status = "Early Checkout"
 
     return {
+        "break_minutes": effective_break_minutes,
         "working_minutes": working_minutes,
         "early_checkout_minutes": early_checkout_minutes,
         "overtime_minutes": overtime_minutes,
@@ -999,7 +1024,7 @@ def check_out(auth_user_id: str, data, request: Optional[Request] = None):
             existing["id"],
             {
                 "check_out_time": check_out_time.isoformat(),
-                "break_minutes": total_break_minutes,
+                "break_minutes": computed["break_minutes"],
                 "working_minutes": working_minutes,
                 "early_checkout_minutes": early_checkout_minutes,
                 "overtime_minutes": overtime_minutes,
@@ -3515,6 +3540,7 @@ def decide_regularization(
                         _as_naive_utc(resulting_check_out),
                         attendance_record.get("break_minutes") or 0,
                     )
+                    patch["break_minutes"] = computed["break_minutes"]
                     patch["working_minutes"] = computed["working_minutes"]
                     patch["early_checkout_minutes"] = computed["early_checkout_minutes"]
                     patch["overtime_minutes"] = computed["overtime_minutes"]
@@ -3797,6 +3823,7 @@ def get_org_attendance_report(
     try:
         roster_query = supabase_admin.table("employees").select(
             "id, employee_id, full_name, profile_photo, department_id, "
+            "ot_eligible, ot_weekday_end, ot_saturday_end, "
             "departments!employees_department_id_fkey(department_name), "
             "designations(designation_name)"
         )
@@ -3806,6 +3833,7 @@ def get_org_attendance_report(
             roster_query = roster_query.eq("id", employee_id)
 
         roster = (roster_query.order("full_name").execute()).data or []
+        company_tz = _get_company_timezone()
 
         if not roster:
             return success_response(
@@ -3865,13 +3893,22 @@ def get_org_attendance_report(
 
         for emp_id in roster_ids:
             emp = roster_by_id[emp_id]
+            ot_eligible = bool(emp.get("ot_eligible"))
+            # OT-eligible on-site staff work Mon-Sat (6 days).
+            emp_days = (
+                [d for d in _daterange(from_date, to_date) if d.weekday() < 6]
+                if ot_eligible
+                else working_days
+            )
             summary = {
                 "employee_id": emp_id,
                 "employee_code": emp.get("employee_id"),
                 "full_name": emp.get("full_name"),
                 "department": (emp.get("departments") or {}).get("department_name"),
                 "designation": (emp.get("designations") or {}).get("designation_name"),
-                "working_days": len(working_days),
+                "ot_eligible": ot_eligible,
+                "total_ot_hours": 0,
+                "working_days": len(emp_days),
                 "present_days": 0,
                 "half_days": 0,
                 "leave_days": 0,
@@ -3882,7 +3919,7 @@ def get_org_attendance_report(
             }
             leave_dates = leave_dates_by_employee.get(emp_id, set())
 
-            for d in working_days:
+            for d in emp_days:
                 record = attendance_by_key.get((emp_id, d.isoformat()))
                 day_status = None
 
@@ -3916,6 +3953,16 @@ def get_org_attendance_report(
                     continue
 
                 working_minutes = record.get("working_minutes") if record else 0
+                ot = {"after_shift_minutes": 0, "ot_hours": 0}
+                if ot_eligible and record:
+                    ot = compute_ot(
+                        d,
+                        record.get("check_out_time"),
+                        emp.get("ot_weekday_end"),
+                        emp.get("ot_saturday_end"),
+                        company_tz,
+                    )
+                    summary["total_ot_hours"] += ot["ot_hours"]
                 daily_records.append(
                     {
                         "employee_id": emp_id,
@@ -3930,6 +3977,9 @@ def get_org_attendance_report(
                             record.get("check_out_time") if record else None
                         ),
                         "working_hours": round((working_minutes or 0) / 60, 1),
+                        "ot_eligible": ot_eligible,
+                        "after_shift_minutes": ot["after_shift_minutes"],
+                        "ot_hours": ot["ot_hours"],
                         "status": day_status,
                     }
                 )
@@ -4150,6 +4200,7 @@ def admin_update_attendance(
                 datetime.fromisoformat(resulting_check_out),
                 existing.get("break_minutes") or 0,
             )
+            values["break_minutes"] = computed["break_minutes"]
             values["working_minutes"] = computed["working_minutes"]
             values["early_checkout_minutes"] = computed["early_checkout_minutes"]
             values["overtime_minutes"] = computed["overtime_minutes"]

@@ -65,6 +65,8 @@ from app.reports.routes import router as report_router
 from app.settings.routes import router as settings_router
 from app.access_control.routes import router as access_control_router
 
+# with the other imports (around line 69)
+from app.ot_calculator.routes import router as ot_calculator_router
 
 from app.audit_logs.routes import router as audit_log_router
 
@@ -334,6 +336,7 @@ app.add_exception_handler(Exception, unhandled_exception_handler)
 
 app.include_router(auth_router)
 
+app.include_router(ot_calculator_router)
 app.include_router(employee_router)
 
 app.include_router(department_router)

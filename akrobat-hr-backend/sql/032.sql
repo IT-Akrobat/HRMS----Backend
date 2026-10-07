@@ -521,3 +521,46 @@ alter table employees
     add constraint employees_working_location_check
     check (working_location is null
            or working_location in ('Office', 'Site', 'Office and Site'));
+
+
+           -- =====================================================================
+-- OT-eligible on-site staff (additional salary for overtime).
+-- Run BEFORE deploying the matching backend change.
+-- Safe to re-run.
+-- =====================================================================
+
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS ot_eligible boolean NOT NULL DEFAULT false;
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS ot_weekday_end time;   -- OT counts after this, Mon-Fri
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS ot_saturday_end time;  -- OT counts after this, Sat
+
+-- GROUP 1: 8:00-16:30 Mon-Fri, 8:00-15:30 Sat
+UPDATE employees
+SET ot_eligible = true, ot_weekday_end = '16:30', ot_saturday_end = '15:30'
+WHERE upper(trim(full_name)) IN (
+  'DETCHANAMURTHY SAKTHIVEL',
+  'MUTHUKKARUPPAN SINGARAVELU',
+  'PANNEERSELVAM MURUGANANTHAM',
+  'SELVANATHAN SATHISHKUMAR',
+  'SELVARAJ ANANTH',
+  'KANNAN SEEMAN',
+  'MARIAPPAN ARJUNAN',
+  'PANNEER SELVAM ANBU SELVAN',
+  'ALAMIN 2 (RA)',
+  'MADHAVAN CHELLAPANDIAN',
+  'RAMALINGAM SRITHAR',
+  'PERIYANNAN MARUTHU',
+  'SELVARASU MAHESH',
+  'RAJANKAM SENTHAMILAN',
+  'VALLATHARASU GANESAMOORTHY',
+  'ALAGAR AYYANJOTHI',
+  'KARUNANITHI PRAVEEN KUMAR'
+);
+
+-- GROUP 2: 6:30-17:30 Mon-Fri, 6:30-16:30 Sat
+UPDATE employees
+SET ot_eligible = true, ot_weekday_end = '17:30', ot_saturday_end = '16:30'
+WHERE upper(trim(full_name)) = 'ULAGANATHAN PRAKASH';
+
+-- CHECK: should return 18 rows. If fewer, the missing names are spelled
+-- differently in the employees table -- fix the spelling and re-run.
+SELECT full_name, ot_weekday_end, ot_saturday_end FROM employees WHERE ot_eligible ORDER BY full_name;

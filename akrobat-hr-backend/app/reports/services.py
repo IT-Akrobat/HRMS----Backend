@@ -214,12 +214,36 @@ def attendance_report():
             employees(
                 full_name,
                 employee_id,
-                profile_photo
+                profile_photo,
+                ot_eligible,
+                ot_weekday_end,
+                ot_saturday_end
             )
             """).order("attendance_date", desc=True).execute()
 
+        # OT for eligible on-site staff (see app/attendance/ot.py).
+        from app.attendance.ot import compute_ot
+        from app.attendance.services import _get_company_timezone
+
+        company_tz = _get_company_timezone()
+        rows = response.data or []
+        for row in rows:
+            emp = row.get("employees") or {}
+            row["ot_eligible"] = bool(emp.get("ot_eligible"))
+            ot = {"after_shift_minutes": 0, "ot_hours": 0}
+            if row["ot_eligible"]:
+                ot = compute_ot(
+                    row.get("attendance_date"),
+                    row.get("check_out_time"),
+                    emp.get("ot_weekday_end"),
+                    emp.get("ot_saturday_end"),
+                    company_tz,
+                )
+            row["after_shift_minutes"] = ot["after_shift_minutes"]
+            row["ot_hours"] = ot["ot_hours"]
+
         return success_response(
-            message="Attendance report fetched successfully", data=response.data
+            message="Attendance report fetched successfully", data=rows
         )
 
     except Exception as e:
