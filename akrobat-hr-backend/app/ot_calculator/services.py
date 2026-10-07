@@ -14,7 +14,8 @@ from typing import Optional
 from fastapi import HTTPException, Request
 
 from app.attendance.ot import compute_ot
-from app.attendance.services import _get_company_timezone, _timezone_from_profile
+from app.attendance.services import _get_company_timezone
+from app.attendance.tz_helper import resolve_record_timezone
 from app.core.audit import record_audit_log
 from app.core.database import supabase_admin
 from app.core.exceptions import bad_request, internal_server_error
@@ -70,7 +71,11 @@ def get_ot_month(month: str, employee_id: Optional[str] = None):
         ids = [e["id"] for e in staff]
         att = (
             supabase_admin.table("attendance")
-            .select("employee_id, attendance_date, check_in_time, check_out_time")
+            .select(
+                "employee_id, attendance_date, check_in_time, check_out_time, "
+                "check_in_latitude, check_in_longitude, "
+                "check_out_latitude, check_out_longitude"
+            )
             .in_("employee_id", ids)
             .gte("attendance_date", first.isoformat())
             .lte("attendance_date", last.isoformat())
@@ -93,7 +98,6 @@ def get_ot_month(month: str, employee_id: Optional[str] = None):
 
         result = []
         for emp in staff:
-            emp_tz = _timezone_from_profile(emp.get("work_location"), None) or tz
             rows = []
             totals = {
                 "after_shift_minutes": 0,
@@ -106,6 +110,7 @@ def get_ot_month(month: str, employee_id: Optional[str] = None):
                 day = date.fromisoformat(a["attendance_date"])
                 if day.weekday() == 6:  # no OT rule for Sunday
                     continue
+                emp_tz = resolve_record_timezone(a, emp.get("work_location"), tz)
                 ot = compute_ot(
                     day,
                     a.get("check_out_time"),
@@ -130,6 +135,7 @@ def get_ot_month(month: str, employee_id: Optional[str] = None):
                         "date": a["attendance_date"],
                         "weekday": WEEKDAYS[day.weekday()],
                         "shift_end": _hhmm(shift_end),
+                        "timezone": emp_tz.key,
                         "check_out": _local_hhmm(a.get("check_out_time"), emp_tz),
                         "after_shift_minutes": ot["after_shift_minutes"],
                         "auto_ot_hours": ot["ot_hours"],

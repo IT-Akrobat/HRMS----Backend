@@ -225,16 +225,16 @@ def attendance_report():
 
         # OT for eligible on-site staff (see app/attendance/ot.py).
         from app.attendance.ot import compute_ot
-        from app.attendance.services import (
-            _get_company_timezone,
-            _timezone_from_profile,
-        )
+        from app.attendance.services import _get_company_timezone
+        from app.attendance.tz_helper import resolve_record_timezone
 
         company_tz = _get_company_timezone()
         rows = response.data or []
         for row in rows:
             emp = row.get("employees") or {}
             row["ot_eligible"] = bool(emp.get("ot_eligible"))
+            row_tz = resolve_record_timezone(row, emp.get("work_location"), company_tz)
+            row["timezone"] = row_tz.key
             ot = {"after_shift_minutes": 0, "ot_hours": 0}
             if row["ot_eligible"]:
                 ot = compute_ot(
@@ -242,8 +242,7 @@ def attendance_report():
                     row.get("check_out_time"),
                     emp.get("ot_weekday_end"),
                     emp.get("ot_saturday_end"),
-                    _timezone_from_profile(emp.get("work_location"), None)
-                    or company_tz,
+                    row_tz,
                 )
             row["after_shift_minutes"] = ot["after_shift_minutes"]
             row["ot_hours"] = ot["ot_hours"]
@@ -702,6 +701,16 @@ def _build_month_days(
     """One entry per calendar day from start..end (inclusive)."""
     holidays = holidays or {}
     by_date = {str(r.get("attendance_date"))[:10]: r for r in (records or [])}
+
+    # Stamp each record with the timezone it happened in (check-in GPS,
+    # else the company timezone) so the screen/CSV shows the same clock
+    # time no matter where the viewer is.
+    from app.attendance.services import _get_company_timezone
+    from app.attendance.tz_helper import resolve_record_timezone
+
+    company_tz = _get_company_timezone()
+    for r in by_date.values():
+        r["timezone"] = resolve_record_timezone(r, None, company_tz).key
     days = []
     d = start
     while d <= end:

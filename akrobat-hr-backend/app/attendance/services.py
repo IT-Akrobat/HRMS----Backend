@@ -27,6 +27,7 @@ from app.core.database import supabase_admin
 from app.core import realtime
 from app.notifications.services import notify_employee
 from app.attendance.ot import compute_ot
+from app.attendance.tz_helper import resolve_record_timezone
 
 attendance_repo = SupabaseRepository("attendance")
 correction_repo = SupabaseRepository("attendance_corrections")
@@ -3855,7 +3856,8 @@ def get_org_attendance_report(
             .select(
                 "employee_id, attendance_date, status, check_in_time, "
                 "check_out_time, late_minutes, working_minutes, "
-                "overtime_minutes"
+                "overtime_minutes, check_in_latitude, check_in_longitude, "
+                "check_out_latitude, check_out_longitude"
             )
             .in_("employee_id", roster_ids)
             .gte("attendance_date", from_date.isoformat())
@@ -3954,6 +3956,9 @@ def get_org_attendance_report(
                     continue
 
                 working_minutes = record.get("working_minutes") if record else 0
+                row_tz = resolve_record_timezone(
+                    record, emp.get("work_location"), company_tz
+                )
                 ot = {"after_shift_minutes": 0, "ot_hours": 0}
                 if ot_eligible and record:
                     ot = compute_ot(
@@ -3961,8 +3966,7 @@ def get_org_attendance_report(
                         record.get("check_out_time"),
                         emp.get("ot_weekday_end"),
                         emp.get("ot_saturday_end"),
-                        _timezone_from_profile(emp.get("work_location"), None)
-                        or company_tz,
+                        row_tz,
                     )
                     summary["total_ot_hours"] += ot["ot_hours"]
                 daily_records.append(
@@ -3980,6 +3984,7 @@ def get_org_attendance_report(
                         ),
                         "working_hours": round((working_minutes or 0) / 60, 1),
                         "ot_eligible": ot_eligible,
+                        "timezone": row_tz.key,
                         "after_shift_minutes": ot["after_shift_minutes"],
                         "ot_hours": ot["ot_hours"],
                         "status": day_status,
