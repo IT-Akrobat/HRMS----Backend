@@ -697,6 +697,7 @@ def _build_month_days(
     works_saturday: bool,
     alternate_saturday: bool,
     holidays: dict | None = None,
+    emp: dict | None = None,
 ):
     """One entry per calendar day from start..end (inclusive)."""
     holidays = holidays or {}
@@ -709,8 +710,27 @@ def _build_month_days(
     from app.attendance.tz_helper import resolve_record_timezone
 
     company_tz = _get_company_timezone()
+    from app.attendance.ot import compute_ot
+
+    emp = emp or {}
+    ot_eligible = bool(emp.get("ot_eligible"))
     for r in by_date.values():
-        r["timezone"] = resolve_record_timezone(r, None, company_tz).key
+        row_tz = resolve_record_timezone(r, emp.get("work_location"), company_tz)
+        r["timezone"] = row_tz.key
+        # Same OT figures the Reports screen shows (see attendance_report),
+        # so the Excel download matches the page.
+        r["ot_eligible"] = ot_eligible
+        ot = {"after_shift_minutes": 0, "ot_hours": 0}
+        if ot_eligible:
+            ot = compute_ot(
+                r.get("attendance_date"),
+                r.get("check_out_time"),
+                emp.get("ot_weekday_end"),
+                emp.get("ot_saturday_end"),
+                row_tz,
+            )
+        r["after_shift_minutes"] = ot["after_shift_minutes"]
+        r["ot_hours"] = ot["ot_hours"]
     days = []
     d = start
     while d <= end:
@@ -780,6 +800,7 @@ def employee_monthly_attendance_report(employee_id: str, month: str):
 
         emp_resp = supabase_admin.table("employees").select("""
                 full_name, employee_id, works_saturday, alternate_saturday,
+                ot_eligible, ot_weekday_end, ot_saturday_end, work_location,
                 departments!employees_department_id_fkey(department_name),
                 designations(designation_name)
                 """).eq("id", employee_id).maybe_single().execute()
@@ -819,6 +840,7 @@ def employee_monthly_attendance_report(employee_id: str, month: str):
             works_sat,
             alt_sat,
             _holidays_in_range(start, end),
+            employee,
         )
 
         data = {
@@ -875,6 +897,7 @@ def all_employees_monthly_attendance_report(month: str):
             lambda: supabase_admin.table("employees")
             .select(
                 "id, full_name, employee_id, works_saturday, alternate_saturday, "
+                "ot_eligible, ot_weekday_end, ot_saturday_end, work_location, "
                 "departments!employees_department_id_fkey(department_name), "
                 "designations(designation_name)"
             )
@@ -921,6 +944,7 @@ def all_employees_monthly_attendance_report(month: str):
                         _leave_dates_in_range(leave_by_emp.get(emp_id, []), start, end),
                         *_saturday_flags(emp),
                         holidays,
+                        emp,
                     ),
                 }
             )
