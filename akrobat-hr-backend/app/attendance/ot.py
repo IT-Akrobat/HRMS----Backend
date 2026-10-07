@@ -5,10 +5,10 @@ Overtime (OT) for on-site staff who are eligible for additional salary
 Rule (clock-time based, NOT "hours worked"):
   * OT counts only after the employee's shift end time
     (Mon-Fri: employees.ot_weekday_end, Sat: employees.ot_saturday_end).
-  * Whole hours only. For each hour, the leftover minutes must be MORE
-    than 41 to round up to the next hour; 41 or less is dropped.
-        0h41m -> 0h    0h42m -> 1h
-        1h30m -> 1h    1h41m -> 1h    1h42m -> 2h
+  * Whole hours only. For each hour, the leftover minutes must reach 41
+    to round up to the next hour; 40 or less is dropped.
+        0h40m -> 0h    0h41m -> 1h
+        1h40m -> 1h    1h41m -> 2h    2h40m -> 2h    2h41m -> 3h
   * The raw minutes after shift end are always returned too, so HR can
     still see e.g. "35m after shift, 0h OT".
 """
@@ -16,13 +16,13 @@ Rule (clock-time based, NOT "hours worked"):
 from datetime import date, datetime, time, timezone
 from typing import Optional
 
-OT_ROUND_UP_AFTER_MINUTES = 41
+OT_ROUND_UP_AT_MINUTES = 41
 
 
 def ot_hours_from_minutes(after_shift_minutes: int) -> int:
     minutes = max(0, int(after_shift_minutes or 0))
     hours, leftover = divmod(minutes, 60)
-    if leftover > OT_ROUND_UP_AFTER_MINUTES:
+    if leftover >= OT_ROUND_UP_AT_MINUTES:
         hours += 1
     return hours
 

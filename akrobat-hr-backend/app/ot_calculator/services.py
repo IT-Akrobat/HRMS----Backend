@@ -14,7 +14,7 @@ from typing import Optional
 from fastapi import HTTPException, Request
 
 from app.attendance.ot import compute_ot
-from app.attendance.services import _get_company_timezone
+from app.attendance.services import _get_company_timezone, _timezone_from_profile
 from app.core.audit import record_audit_log
 from app.core.database import supabase_admin
 from app.core.exceptions import bad_request, internal_server_error
@@ -53,7 +53,10 @@ def get_ot_month(month: str, employee_id: Optional[str] = None):
 
         query = (
             supabase_admin.table("employees")
-            .select("id, employee_id, full_name, ot_weekday_end, ot_saturday_end")
+            .select(
+                "id, employee_id, full_name, ot_weekday_end, ot_saturday_end, "
+                "work_location, nationality"
+            )
             .eq("ot_eligible", True)
         )
         if employee_id:
@@ -90,6 +93,7 @@ def get_ot_month(month: str, employee_id: Optional[str] = None):
 
         result = []
         for emp in staff:
+            emp_tz = _timezone_from_profile(emp.get("work_location"), None) or tz
             rows = []
             totals = {
                 "after_shift_minutes": 0,
@@ -107,7 +111,7 @@ def get_ot_month(month: str, employee_id: Optional[str] = None):
                     a.get("check_out_time"),
                     emp.get("ot_weekday_end"),
                     emp.get("ot_saturday_end"),
-                    tz,
+                    emp_tz,
                 )
                 adjustment = adj_by_key.get((emp["id"], a["attendance_date"]))
                 manual = (
@@ -126,7 +130,7 @@ def get_ot_month(month: str, employee_id: Optional[str] = None):
                         "date": a["attendance_date"],
                         "weekday": WEEKDAYS[day.weekday()],
                         "shift_end": _hhmm(shift_end),
-                        "check_out": _local_hhmm(a.get("check_out_time"), tz),
+                        "check_out": _local_hhmm(a.get("check_out_time"), emp_tz),
                         "after_shift_minutes": ot["after_shift_minutes"],
                         "auto_ot_hours": ot["ot_hours"],
                         "manual_ot_hours": manual,

@@ -217,13 +217,18 @@ def attendance_report():
                 profile_photo,
                 ot_eligible,
                 ot_weekday_end,
-                ot_saturday_end
+                ot_saturday_end,
+                work_location,
+                nationality
             )
             """).order("attendance_date", desc=True).execute()
 
         # OT for eligible on-site staff (see app/attendance/ot.py).
         from app.attendance.ot import compute_ot
-        from app.attendance.services import _get_company_timezone
+        from app.attendance.services import (
+            _get_company_timezone,
+            _timezone_from_profile,
+        )
 
         company_tz = _get_company_timezone()
         rows = response.data or []
@@ -237,7 +242,8 @@ def attendance_report():
                     row.get("check_out_time"),
                     emp.get("ot_weekday_end"),
                     emp.get("ot_saturday_end"),
-                    company_tz,
+                    _timezone_from_profile(emp.get("work_location"), None)
+                    or company_tz,
                 )
             row["after_shift_minutes"] = ot["after_shift_minutes"]
             row["ot_hours"] = ot["ot_hours"]

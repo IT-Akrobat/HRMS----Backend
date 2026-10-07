@@ -3824,6 +3824,7 @@ def get_org_attendance_report(
         roster_query = supabase_admin.table("employees").select(
             "id, employee_id, full_name, profile_photo, department_id, "
             "ot_eligible, ot_weekday_end, ot_saturday_end, "
+            "work_location, nationality, "
             "departments!employees_department_id_fkey(department_name), "
             "designations(designation_name)"
         )
@@ -3960,7 +3961,8 @@ def get_org_attendance_report(
                         record.get("check_out_time"),
                         emp.get("ot_weekday_end"),
                         emp.get("ot_saturday_end"),
-                        company_tz,
+                        _timezone_from_profile(emp.get("work_location"), None)
+                        or company_tz,
                     )
                     summary["total_ot_hours"] += ot["ot_hours"]
                 daily_records.append(
