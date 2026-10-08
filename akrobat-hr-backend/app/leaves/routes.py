@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 
 from app.leaves.schemas import (
     CreateLeaveRequest,
@@ -7,6 +7,13 @@ from app.leaves.schemas import (
     CreditReplacementLeaveRequest,
     GenerateYearlyBalancesRequest,
     GrantLeaveBalanceRequest,
+    RecordHrManagedLeaveRequest,
+    CreateLeaveTypeRequest,
+)
+from app.leaves.entitlement_services import (
+    get_entitlement_form_types,
+    get_employee_entitlement_days,
+    create_leave_type,
 )
 
 from app.leaves.services import (
@@ -16,6 +23,13 @@ from app.leaves.services import (
     get_leave_types,
     get_team_leaves,
     update_leave_status,
+    record_hr_managed_leave,
+)
+from app.leaves.mc_services import (
+    upload_medical_certificate,
+    get_medical_certificate_url,
+    validate_mc,
+    get_mc_pending_validation,
 )
 from app.leaves.policy_services import (
     get_tiers_for_leave_type,
@@ -27,6 +41,7 @@ from app.leaves.policy_services import (
     recompute_annual_leave_tenure_tiers,
     get_my_leave_entitlements,
     grant_leave_balance_days,
+    get_all_leave_balances,
 )
 from app.core.helpers.employee_helper import get_employee_id_for_auth_user
 
@@ -34,6 +49,8 @@ from app.core.security import get_current_user
 from app.core.rbac import require_permission
 from app.core.permissions import require_role
 from app.core.constants import ADMIN, HR
+
+HR_ROLES = [ADMIN, HR, "HR ADMIN", "HR EXECUTIVE"]
 
 router = APIRouter(prefix="/leaves", tags=["Leaves"])
 
@@ -81,7 +98,9 @@ def my_leave_entitlements(user=Depends(get_current_user)):
 
 
 @router.get("/team")
-def team_leaves(user=Depends(require_permission("VIEW_LEAVE_REQUESTS"))):
+def team_leaves(user=Depends(get_current_user)):
+    # Scoped inside get_team_leaves() to this person's reports and the
+    # employees they are the assigned leave manager for.
     return get_team_leaves(user.id)
 
 
@@ -95,9 +114,12 @@ def all_leaves(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     status: str | None = Query(None),
+    employee_id: str | None = Query(None),
     user=Depends(require_permission("VIEW_LEAVE_REQUESTS")),
 ):
-    return get_all_leaves(page=page, limit=limit, status=status)
+    return get_all_leaves(
+        page=page, limit=limit, status=status, employee_id=employee_id
+    )
 
 
 # ==========================================
@@ -110,10 +132,45 @@ def leave_types(user=Depends(require_permission("VIEW_LEAVE_REQUESTS"))):
     return get_leave_types()
 
 
+@router.post("/types")
+def add_leave_type(
+    data: CreateLeaveTypeRequest,
+    request: Request,
+    user=Depends(require_role(HR_ROLES)),
+):
+    """HR / Super Admin: add a new leave type (shows up as a days input on
+    the Create / Edit User form straight away)."""
+    return create_leave_type(
+        data.leave_name,
+        data.default_days,
+        applies_to=data.applies_to,
+        married_only=data.married_only,
+        is_paid=data.is_paid,
+        description=data.description,
+        created_by=get_employee_id_for_auth_user(user.id),
+        request=request,
+    )
+
+
+# ==========================================
+# GET ALL LEAVE BALANCES (HR / Admin — backs the Leave Balance screen)
+# Must be declared before any "/{leave_id}" route.
+# ==========================================
+
+
+@router.get("/balances")
+def all_leave_balances(
+    year: int | None = Query(None),
+    user=Depends(require_permission("VIEW_LEAVE_REQUESTS")),
+):
+    return get_all_leave_balances(year)
+
+
 # ==========================================
 # APPROVE / REJECT LEAVE
-# (SUPER ADMIN only — company policy: no other role may approve/reject
-#  leave, regardless of what's granted in role_permissions)
+# The employee's assigned leave manager (or Super Admin) decides. The
+# leave-manager check lives in update_leave_status(), because it depends
+# on WHICH employee the request belongs to, not just on the caller's role.
 # ==========================================
 
 
@@ -122,7 +179,7 @@ def update_status(
     leave_id: str,
     data: UpdateLeaveStatusRequest,
     request: Request,
-    user=Depends(require_role([ADMIN])),
+    user=Depends(get_current_user),
 ):
     return update_leave_status(leave_id, data, auth_user_id=user.id, request=request)
 
@@ -140,6 +197,22 @@ def leave_policy_tiers(
     Used to populate the Annual Leave / Childcare Leave tier dropdowns on
     the Employee create/edit form."""
     return get_tiers_for_leave_type(leave_name)
+
+
+@router.get("/policy/entitlement-types")
+def entitlement_types(user=Depends(require_permission("VIEW_LEAVE_REQUESTS"))):
+    """Leave types that get a "days" input on the Create / Edit User form,
+    with the gender / marital-status exclusions the form uses to hide
+    e.g. Maternity for a male employee."""
+    return get_entitlement_form_types()
+
+
+@router.get("/policy/employee-entitlements/{employee_id}")
+def employee_entitlements(
+    employee_id: str, user=Depends(require_permission("VIEW_LEAVE_REQUESTS"))
+):
+    """{leave_type_id: days} currently set for this employee (Edit User)."""
+    return get_employee_entitlement_days(employee_id)
 
 
 @router.post("/policy/assign-tier")
@@ -229,3 +302,51 @@ def recompute_annual_tenure(
     """HR/Admin-triggered — recompute the +1 day/year (capped at 14)
     tenure bonus for employees on the Annual Leave 10-day tier."""
     return recompute_annual_leave_tenure_tiers(data.year, current_user=user)
+
+
+# ==========================================
+# MC (MEDICAL CERTIFICATE) FLOW
+# ==========================================
+
+
+@router.post("/{leave_id}/medical-certificate")
+def upload_mc_certificate(
+    leave_id: str,
+    request: Request,
+    file: UploadFile = File(...),
+    user=Depends(get_current_user),
+):
+    """Step 2 of the MC flow: employee attaches the certificate. HR is notified."""
+    return upload_medical_certificate(user.id, leave_id, file, request=request)
+
+
+@router.get("/{leave_id}/medical-certificate")
+def view_mc_certificate(leave_id: str, user=Depends(get_current_user)):
+    """Short-lived link to the certificate (owner, leave manager, HR, Super Admin)."""
+    return get_medical_certificate_url(user.id, leave_id)
+
+
+@router.put("/{leave_id}/mc-validate")
+def mc_validate(leave_id: str, request: Request, user=Depends(require_role(HR_ROLES))):
+    """HR / Super Admin confirms the leave is a valid MC."""
+    return validate_mc(user.id, leave_id, request=request)
+
+
+# ==========================================
+# HR / SUPER ADMIN: HOSPITALISATION + MATERNITY (hidden from employees)
+# ==========================================
+
+
+@router.post("/hr-managed")
+def record_hr_leave(
+    data: RecordHrManagedLeaveRequest,
+    request: Request,
+    user=Depends(require_role(HR_ROLES)),
+):
+    return record_hr_managed_leave(user.id, data, request=request)
+
+
+@router.get("/mc/pending-validation")
+def mc_pending_validation(user=Depends(require_role(HR_ROLES))):
+    """HR / Super Admin queue: MCs not yet validated (oldest first)."""
+    return get_mc_pending_validation()

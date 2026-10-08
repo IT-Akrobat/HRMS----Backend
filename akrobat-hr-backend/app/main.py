@@ -3,6 +3,7 @@ import sys
 from types import SimpleNamespace
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from app.leaves.mc_services import send_mc_validation_reminders
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
@@ -181,6 +182,17 @@ async def _start_site_visit_check_scheduler():
         minute=0,
         timezone=_get_company_timezone(),
         id="flag_missed_site_visits",
+        replace_existing=True,
+    )
+    # MC not validated by HR within 5 days -> remind HR, leave manager and
+    # Super Admin (see app/leaves/mc_services.py). Once per MC.
+    _scheduler.add_job(
+        send_mc_validation_reminders,
+        "cron",
+        hour=9,
+        minute=0,
+        timezone=_get_company_timezone(),
+        id="mc_validation_reminders",
         replace_existing=True,
     )
     _scheduler.start()

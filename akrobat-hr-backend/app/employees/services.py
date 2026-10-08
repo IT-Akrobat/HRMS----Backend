@@ -30,9 +30,12 @@ from app.leaves.policy_services import (
     assign_employee_leave_tier,
     evaluate_leave_eligibility,
     get_leave_type_or_404,
-    apply_chennai_leave_default,
     CHILDCARE_LEAVE,
     ANNUAL_LEAVE,
+)
+from app.leaves.entitlement_services import (
+    apply_leave_entitlements,
+    validate_leave_entitlements,
 )
 
 employee_repo = SupabaseRepository("employees")
@@ -250,6 +253,10 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
                     str(data.designation_id) if data.designation_id else None
                 ),
                 "manager_id": str(data.manager_id) if data.manager_id else None,
+                "leave_manager_id": (
+                    str(data.leave_manager_id) if data.leave_manager_id else None
+                ),
+                "leave_scheme": data.leave_scheme,
                 "joining_date": str(data.joining_date) if data.joining_date else None,
                 "date_of_birth": (
                     str(data.date_of_birth) if data.date_of_birth else None
@@ -316,12 +323,17 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
                     ),
                 )
 
-        # Chennai Leave Default: Sick Leave + Casual Leave set to 12
-        # days each for this employee only, via a per-employee override
-        # (see app/leaves/policy_services.py apply_chennai_leave_default).
-        # No effect on any other employee, department, or location.
-        if data.chennai_leave_default:
-            apply_chennai_leave_default(employee_data["id"])
+        # "Leave days" inputs from the form (Annual / MC / Replacement /
+        # Childcare / Maternity / Paternity / HR-added types). Applied after
+        # the Chennai default so a number HR typed explicitly wins.
+        if data.leave_entitlements:
+            apply_leave_entitlements(
+                employee_data,
+                [e.model_dump() for e in data.leave_entitlements],
+                assigned_by=get_employee_id_for_auth_user(
+                    getattr(current_user, "id", None)
+                ),
+            )
 
         supabase_admin.table("user_profiles").insert(
             {
@@ -460,7 +472,15 @@ def update_employee(
 
         # Same story as the tier ids above -- not an employees column,
         # applied separately via employee_leave_overrides after update.
-        chennai_leave_default = update_data.pop("chennai_leave_default", None)
+
+        # Leave days typed on the form -- validated now (before anything is
+        # saved) and applied after the employee row is updated below.
+        leave_entitlements = update_data.pop("leave_entitlements", None)
+        validated_entitlements = (
+            validate_leave_entitlements(employee_id, leave_entitlements)
+            if leave_entitlements
+            else None
+        )
 
         # OPERATION department: works every Saturday (8:00 AM - 3:30 PM),
         # no alternate-Saturday pattern. Applies whenever the employee is
@@ -525,6 +545,11 @@ def update_employee(
             ):
                 update_data["shift_id"] = resolved_shift_id
 
+        if update_data.get("leave_manager_id"):
+            validate_reference(
+                "employees", update_data["leave_manager_id"], "Leave manager"
+            )
+
         if "manager_id" in update_data:
             validate_reference("employees", update_data["manager_id"], "Manager")
 
@@ -535,6 +560,7 @@ def update_employee(
             "shift_id",
             "saturday_shift_id",
             "manager_id",
+            "leave_manager_id",
         ):
             if key in update_data and update_data[key] is not None:
                 update_data[key] = str(update_data[key])
@@ -583,11 +609,15 @@ def update_employee(
                     f"{employee_id}: not eligible."
                 )
 
-        # Chennai Leave Default, same as in create_employee(). Only
-        # applied when the checkbox was explicitly ticked in this edit;
-        # unchecked/omitted leaves any existing override untouched.
-        if chennai_leave_default:
-            apply_chennai_leave_default(employee_id)
+        if validated_entitlements:
+            apply_leave_entitlements(
+                updated_employee,
+                leave_entitlements,
+                assigned_by=get_employee_id_for_auth_user(
+                    getattr(current_user, "id", None)
+                ),
+                normalised=validated_entitlements,
+            )
 
         # The employees.email column HR/Super Admin just edited above is
         # a completely separate value from the Supabase Auth login email

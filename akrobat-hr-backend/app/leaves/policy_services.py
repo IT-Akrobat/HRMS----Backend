@@ -47,21 +47,26 @@ CHILDCARE_LEAVE = "CHILDCARE LEAVE"
 REPLACEMENT_LEAVE = "REPLACEMENT LEAVE"
 NATIONAL_SERVICE_LEAVE = "NATIONAL SERVICE LEAVE"
 UNPAID_LEAVE = "UNPAID LEAVE"
+SICK_LEAVE = "SICK LEAVE"  # shown to staff as "MC (Medical Leave)"
+
+# employees.leave_scheme values (sql/034_sg_leave_rules.sql)
+SCHEME_SG_LIST = "SG_LIST"  # on the Singapore leave sheet
+SCHEME_MC_ONLY = "MC_ONLY"  # everyone else in Singapore: MC only, no balances
+SCHEME_STANDARD = "STANDARD"  # previous behaviour (Chennai etc.)
+SCHEME_FOREIGN_WORKER = "FOREIGN_WORKER"  # MC + Home Leave (+ Unpaid for extra days)
+
+HOME_LEAVE = "HOME LEAVE"
+# Leave types a FOREIGN_WORKER employee may apply for themselves. Unpaid
+# Leave covers any days beyond the Home Leave cap.
+FOREIGN_WORKER_LEAVE_TYPES = (SICK_LEAVE, HOME_LEAVE, UNPAID_LEAVE)
+
+# Leave types a SG_LIST employee may apply for themselves.
+SG_LIST_LEAVE_TYPES = (ANNUAL_LEAVE, SICK_LEAVE, REPLACEMENT_LEAVE, CHILDCARE_LEAVE)
 
 TENURE_TIER_NAME = "10 DAYS"
 TENURE_TIER_BASE_DAYS = 10
 TENURE_TIER_CAP_DAYS = 14
 TENURE_QUALIFYING_YEARS = 3
-
-# "Chennai Leave Default" -- an opt-in per-employee override (set via
-# the Create/Edit User form's "Chennai Leave Default" checkbox) that
-# gives Sick Leave and Casual Leave a flat 12 days each instead of the
-# company-wide leave_types.default_days figure. Doesn't touch Annual
-# Leave (that's the separate "12 DAYS" tier -- see sql/033_*.sql) and
-# doesn't affect any employee who doesn't have this checked.
-CHENNAI_DEFAULT_LEAVE_DAYS = 12
-CHENNAI_DEFAULT_LEAVE_TYPES = ("SICK LEAVE", "CASUAL LEAVE")
-
 
 # ==========================================
 # LOOKUPS
@@ -103,34 +108,6 @@ def _get_employee_leave_override_days(
     if override and override.get("days") is not None:
         return override["days"]
     return None
-
-
-def apply_chennai_leave_default(employee_id: str):
-    """
-    Applies the "Chennai Leave Default": Sick Leave and Casual Leave
-    both set to CHENNAI_DEFAULT_LEAVE_DAYS (12) for this employee only,
-    via employee_leave_overrides. Safe to call more than once (upsert).
-
-    Doesn't touch Annual Leave -- HR assigns the separate "12 DAYS"
-    Annual Leave tier via the normal annual_leave_tier_id field, same
-    as every other tier.
-    """
-    for leave_name in CHENNAI_DEFAULT_LEAVE_TYPES:
-        leave_type = get_leave_type_or_404(leave_name)
-        payload = {
-            "employee_id": employee_id,
-            "leave_type_id": leave_type["id"],
-            "days": CHENNAI_DEFAULT_LEAVE_DAYS,
-        }
-        existing = leave_override_repo.find_one(
-            {"employee_id": employee_id, "leave_type_id": leave_type["id"]}
-        )
-        if existing:
-            leave_override_repo.update(
-                existing["id"], {"days": CHENNAI_DEFAULT_LEAVE_DAYS}
-            )
-        else:
-            leave_override_repo.create(payload)
 
 
 def get_tiers_for_leave_type(leave_name: str):
@@ -196,6 +173,15 @@ def assign_employee_leave_tier(
         result = employee_tier_repo.update(existing["id"], payload)
     else:
         result = employee_tier_repo.create(payload)
+
+    # A tier assigned explicitly replaces any day count typed on the user
+    # form (otherwise the override would keep winning over the tier).
+    stale_override = leave_override_repo.find_one(
+        {"employee_id": employee_id, "leave_type_id": leave_type["id"]},
+        select="id",
+    )
+    if stale_override:
+        leave_override_repo.delete(stale_override["id"])
 
     # Keep THIS YEAR's leave_balances row in sync with the tier change.
     # Previously this function only upserted employee_leave_tier, so
@@ -422,54 +408,150 @@ def get_replacement_leave_credits(employee_id: str):
         internal_server_error("Unable to fetch replacement leave credits.")
 
 
-def get_unused_replacement_credit_days(employee_id: str) -> int:
-    """Unused, unexpired Replacement Leave credits available today."""
-
+def _unused_credit_rows(employee_id: str) -> list:
     today = date.today().isoformat()
-
     response = (
         supabase_admin.table("leave_replacement_credits")
-        .select("id, expiry_date")
-        .eq("employee_id", employee_id)
-        .eq("used", False)
-        .gte("expiry_date", today)
-        .execute()
-    )
-
-    return len(response.data or [])
-
-
-def consume_replacement_credits(
-    employee_id: str, days_needed: int, leave_request_id: str
-):
-    """
-    Marks the oldest-expiring `days_needed` unused, unexpired credits as
-    used against this leave request. One credit = one day, so this is a
-    straight FIFO-by-expiry consumption.
-    """
-
-    today = date.today().isoformat()
-
-    response = (
-        supabase_admin.table("leave_replacement_credits")
-        .select("id")
+        .select("id, days, used_days, expiry_date")
         .eq("employee_id", employee_id)
         .eq("used", False)
         .gte("expiry_date", today)
         .order("expiry_date")
-        .limit(days_needed)
         .execute()
     )
+    return response.data or []
 
-    credit_ids = [row["id"] for row in (response.data or [])]
 
-    if len(credit_ids) < days_needed:
+def get_unused_replacement_credit_days(employee_id: str) -> float:
+    """Unused, unexpired Replacement Leave days available today (half days allowed)."""
+    return sum(
+        float(r.get("days") or 1) - float(r.get("used_days") or 0)
+        for r in _unused_credit_rows(employee_id)
+    )
+
+
+def consume_replacement_credits(
+    employee_id: str, days_needed: float, leave_request_id: str
+) -> list:
+    """
+    Takes `days_needed` (may be 0.5) from the oldest-expiring credits (FIFO).
+    Returns the allocation [{credit_id, days}] so a rejection can give the
+    days back exactly (see release_replacement_credits).
+    """
+    remaining_needed = float(days_needed)
+    allocation = []
+
+    for row in _unused_credit_rows(employee_id):
+        if remaining_needed <= 0:
+            break
+        free = float(row.get("days") or 1) - float(row.get("used_days") or 0)
+        take = min(free, remaining_needed)
+        if take <= 0:
+            continue
+        new_used = float(row.get("used_days") or 0) + take
+        replacement_credit_repo.update(
+            row["id"],
+            {
+                "used_days": new_used,
+                "used": new_used >= float(row.get("days") or 1),
+                "used_leave_request_id": leave_request_id,
+            },
+        )
+        allocation.append({"credit_id": row["id"], "days": take})
+        remaining_needed -= take
+
+    if remaining_needed > 0:
+        # roll back whatever was taken before failing
+        release_replacement_credits(allocation)
         bad_request("Not enough unused Replacement Leave credits available.")
 
-    for credit_id in credit_ids:
-        replacement_credit_repo.update(
-            credit_id, {"used": True, "used_leave_request_id": leave_request_id}
+    return allocation
+
+
+def release_replacement_credits(allocation: Optional[list]):
+    """Gives held Replacement Leave days back (leave rejected)."""
+    for item in allocation or []:
+        credit = replacement_credit_repo.get_by_id(
+            item["credit_id"], select="id, days, used_days"
         )
+        if not credit:
+            continue
+        new_used = max(float(credit.get("used_days") or 0) - float(item["days"]), 0)
+        replacement_credit_repo.update(
+            credit["id"], {"used_days": new_used, "used": False}
+        )
+
+
+# ==========================================
+# LEAVE SCHEME ACCESS (who may apply for what, who sees balances)
+# ==========================================
+
+
+def get_leave_scheme(employee: dict) -> str:
+    return (employee or {}).get("leave_scheme") or SCHEME_MC_ONLY
+
+
+def tracks_balance(employee: dict, leave_type: dict) -> bool:
+    """
+    Every scheme tracks a balance. MC-only staff have a real MC balance too
+    (14 days, or whatever HR set) -- it is only HIDDEN from them (see
+    get_my_leave_entitlements) so HR can still see how much MC they used.
+    """
+    return True
+
+
+def evaluate_self_apply_access(
+    employee: dict, leave_type: dict
+) -> tuple[bool, Optional[str]]:
+    """
+    Can this employee apply for this leave type themselves?
+
+    - Hospitalisation / Maternity (leave_types.hr_managed): never -- HR and
+      Super Admin record these.
+    - MC_ONLY (not on the Singapore sheet): MC (Sick Leave) only.
+    - SG_LIST: Annual, MC, Replacement, Childcare only (the sheet is the
+      source of truth, so the generic nationality/field rules are skipped).
+    - FOREIGN_WORKER: MC, Home Leave and Unpaid Leave only.
+    - STANDARD: previous eligibility rules.
+    """
+
+    leave_name = (leave_type.get("leave_name") or "").strip().upper()
+
+    if leave_type.get("hr_managed"):
+        return (
+            False,
+            f"{leave_name.title()} is managed by HR and cannot be applied for.",
+        )
+
+    scheme = get_leave_scheme(employee)
+
+    if scheme == SCHEME_MC_ONLY:
+        if leave_name != SICK_LEAVE:
+            return False, "You can only apply for MC (Medical Leave)."
+        return True, None
+
+    if scheme == SCHEME_FOREIGN_WORKER:
+        if leave_name in FOREIGN_WORKER_LEAVE_TYPES:
+            return True, None
+        return False, f"{leave_name.title()} is not available for you."
+
+    if scheme == SCHEME_SG_LIST:
+        if leave_name in SG_LIST_LEAVE_TYPES:
+            return True, None
+
+        # Paternity / HR-added leave types: available only once HR has set
+        # a number of days for this employee (user form -> Leave days),
+        # and still subject to the normal eligibility rules.
+        granted = leave_override_repo.find_one(
+            {"employee_id": employee.get("id"), "leave_type_id": leave_type["id"]},
+            select="days",
+        )
+        if granted and (granted.get("days") or 0) > 0:
+            return evaluate_leave_eligibility(employee, leave_type["id"])
+
+        return False, f"{leave_name.title()} is not available for you."
+
+    return evaluate_leave_eligibility(employee, leave_type["id"])
 
 
 # ==========================================
@@ -534,7 +616,7 @@ def _get_or_create_leave_balance(employee: dict, leave_type: dict, year: int):
 
 
 def validate_leave_request_against_entitlement(
-    employee: dict, leave_type: dict, total_days: int
+    employee: dict, leave_type: dict, total_days: float
 ):
     """
     Raises a 400 if the request can't be honoured. Called after
@@ -551,6 +633,17 @@ def validate_leave_request_against_entitlement(
 
     mode = leave_type.get("entitlement_mode")
     leave_name = (leave_type.get("leave_name") or "").strip().upper()
+
+    # MC-only staff: MC is tracked against their 14 days (so HR can see it)
+    # but never blocked and never shown to them -- no balance or "insufficient"
+    # message ever reaches the employee. Make sure the balance row exists so
+    # deduct_entitlement() has something to deduct from.
+    if get_leave_scheme(employee) == SCHEME_MC_ONLY:
+        if mode == "fixed":
+            _get_or_create_leave_balance(
+                employee, leave_type, datetime.now(timezone.utc).year
+            )
+        return
 
     if mode == "not_a_balance":
         return
@@ -593,28 +686,35 @@ def validate_leave_request_against_entitlement(
         )
 
 
-def apply_entitlement_on_approval(
-    employee_id: str, leave_type: dict, total_days: int, leave_request_id: str
-):
+def deduct_entitlement(
+    employee_id: str, leave_type: dict, total_days: float, leave_request_id: str
+) -> dict:
     """
-    Called when a leave request is approved (see
-    app/leaves/services.py update_leave_status). Deducts from whichever
-    entitlement backs this leave type.
+    Takes the days out of the entitlement that backs this leave type.
+    Called when the employee APPLIES (so the balance they see drops
+    straight away). Returns {"balance_deducted": bool,
+    "replacement_allocation": list|None} to store on the leave request.
     """
+
+    employee = employee_repo.get_by_id(employee_id, select="id, leave_scheme") or {}
+    if not tracks_balance(employee, leave_type):
+        return {"balance_deducted": False, "replacement_allocation": None}
 
     mode = leave_type.get("entitlement_mode")
     leave_name = (leave_type.get("leave_name") or "").strip().upper()
 
     if mode == "not_a_balance":
-        return
+        return {"balance_deducted": False, "replacement_allocation": None}
 
     if mode == "event":
         if leave_name == REPLACEMENT_LEAVE:
-            consume_replacement_credits(employee_id, total_days, leave_request_id)
+            allocation = consume_replacement_credits(
+                employee_id, total_days, leave_request_id
+            )
+            return {"balance_deducted": True, "replacement_allocation": allocation}
         # NS Leave: nothing to deduct, no cap.
-        return
+        return {"balance_deducted": False, "replacement_allocation": None}
 
-    # fixed / tiered — decrement the current year's leave_balances row.
     current_year = datetime.now(timezone.utc).year
     balance = balance_repo.find_one(
         {
@@ -626,19 +726,56 @@ def apply_entitlement_on_approval(
     )
 
     if not balance:
-        # Shouldn't happen if validate_leave_request_against_entitlement
-        # ran at apply time, but don't hard-fail an approval over it.
         logger.error(
             f"No leave_balances row for employee {employee_id}, "
-            f"leave_type {leave_type['id']}, year {current_year} at approval time."
+            f"leave_type {leave_type['id']}, year {current_year} at deduction time."
         )
-        return
+        return {"balance_deducted": False, "replacement_allocation": None}
 
-    new_used = (balance.get("used_days") or 0) + total_days
-    new_remaining = (balance.get("total_days") or 0) - new_used
+    new_used = float(balance.get("used_days") or 0) + float(total_days)
+    new_remaining = float(balance.get("total_days") or 0) - new_used
 
     balance_repo.update(
         balance["id"], {"used_days": new_used, "remaining_days": new_remaining}
+    )
+    return {"balance_deducted": True, "replacement_allocation": None}
+
+
+def release_entitlement(leave_request: dict, leave_type: dict):
+    """Gives the held days back (leave rejected). No-op if nothing was held."""
+
+    if not leave_request.get("balance_deducted"):
+        return
+
+    mode = leave_type.get("entitlement_mode")
+    leave_name = (leave_type.get("leave_name") or "").strip().upper()
+
+    if mode == "event" and leave_name == REPLACEMENT_LEAVE:
+        release_replacement_credits(leave_request.get("replacement_allocation"))
+        return
+
+    balance = balance_repo.find_one(
+        {
+            "employee_id": leave_request["employee_id"],
+            "leave_type_id": leave_type["id"],
+            "year": datetime.now(timezone.utc).year,
+        },
+        select="id, used_days, total_days",
+    )
+    if not balance:
+        return
+
+    new_used = max(
+        float(balance.get("used_days") or 0)
+        - float(leave_request.get("total_days") or 0),
+        0,
+    )
+    balance_repo.update(
+        balance["id"],
+        {
+            "used_days": new_used,
+            "remaining_days": float(balance.get("total_days") or 0) - new_used,
+        },
     )
 
 
@@ -879,6 +1016,164 @@ def grant_leave_balance_days(
 # replacement-credit tables decide *how many* days.
 
 
+def get_all_leave_balances(year: Optional[int] = None):
+    """
+    Company-wide leave balances for the HR Leave Balance screen.
+
+    Returns { balances: [{employee_id, leave_type_id, leave_name, total_days,
+    used_days, remaining_days, year}] } -- the same numbers employees see on
+    Apply Leave: leave_balances rows for the year, plus Replacement Leave
+    built from unused, unexpired credits. Leave types with no balance
+    (Unpaid, NS, MC...) have no row and are omitted.
+    """
+    try:
+        year = year or datetime.now(timezone.utc).year
+
+        leave_types, _ = leave_type_repo.list(select="id, leave_name")
+        name_by_id = {lt["id"]: lt.get("leave_name") for lt in leave_types}
+
+        rows = []
+        page_size = 1000
+        start = 0
+        while True:
+            chunk, _total = balance_repo.list(
+                select="employee_id, leave_type_id, total_days, used_days, remaining_days, year",
+                filters={"year": year},
+                start=start,
+                end=start + page_size - 1,
+            )
+            rows.extend(chunk)
+            if len(chunk) < page_size:
+                break
+            start += page_size
+
+        balances = []
+        for r in rows:
+            leave_name = name_by_id.get(r.get("leave_type_id"))
+            if not leave_name:
+                continue
+            balances.append(
+                {
+                    "employee_id": r["employee_id"],
+                    "leave_type_id": r["leave_type_id"],
+                    "leave_name": leave_name,
+                    "total_days": r.get("total_days") or 0,
+                    "used_days": r.get("used_days") or 0,
+                    "remaining_days": r.get("remaining_days") or 0,
+                    "year": r.get("year"),
+                }
+            )
+
+        # Replacement Leave lives in credits, not leave_balances.
+        replacement_type_id = next(
+            (
+                lt["id"]
+                for lt in leave_types
+                if (lt.get("leave_name") or "").strip().upper() == REPLACEMENT_LEAVE
+            ),
+            None,
+        )
+        if replacement_type_id:
+            today = date.today().isoformat()
+            credits = (
+                supabase_admin.table("leave_replacement_credits")
+                .select("employee_id, days, used_days")
+                .eq("used", False)
+                .gte("expiry_date", today)
+                .execute()
+                .data
+                or []
+            )
+            by_employee = {}
+            for c in credits:
+                total = float(c.get("days") or 1)
+                used = float(c.get("used_days") or 0)
+                agg = by_employee.setdefault(c["employee_id"], [0.0, 0.0])
+                agg[0] += total
+                agg[1] += used
+            for employee_id, (total, used) in by_employee.items():
+                balances.append(
+                    {
+                        "employee_id": employee_id,
+                        "leave_type_id": replacement_type_id,
+                        "leave_name": name_by_id[replacement_type_id],
+                        "total_days": total,
+                        "used_days": used,
+                        "remaining_days": total - used,
+                        "year": year,
+                    }
+                )
+
+        # MC-only staff: show their MC balance (default 14 days, or HR's
+        # override) even before they have a leave_balances row, so HR's Leave
+        # Balance screen isn't empty for them. Nothing is written here; used
+        # days are counted from their pending / approved MC requests.
+        sick_type = next(
+            (
+                lt
+                for lt in leave_types
+                if (lt.get("leave_name") or "").strip().upper() == SICK_LEAVE
+            ),
+            None,
+        )
+        if sick_type:
+            sick_default = (
+                leave_type_repo.get_by_id(sick_type["id"], select="default_days") or {}
+            ).get("default_days") or 0
+            have_sick = {
+                b["employee_id"]
+                for b in balances
+                if b["leave_type_id"] == sick_type["id"]
+            }
+            mc_only_staff, _ = employee_repo.list(
+                select="id",
+                filters={"employment_status": "Active", "leave_scheme": SCHEME_MC_ONLY},
+            )
+            used_by_employee = {}
+            for lr in (
+                supabase_admin.table("leave_requests")
+                .select("employee_id, total_days, status, start_date")
+                .eq("leave_type_id", sick_type["id"])
+                .in_("status", ["Pending", "Approved"])
+                .gte("start_date", f"{year}-01-01")
+                .lte("start_date", f"{year}-12-31")
+                .execute()
+                .data
+                or []
+            ):
+                used_by_employee[lr["employee_id"]] = used_by_employee.get(
+                    lr["employee_id"], 0.0
+                ) + float(lr.get("total_days") or 0)
+
+            for emp in mc_only_staff:
+                if emp["id"] in have_sick:
+                    continue
+                override = _get_employee_leave_override_days(emp["id"], sick_type["id"])
+                total = float(override if override is not None else sick_default)
+                used = used_by_employee.get(emp["id"], 0.0)
+                balances.append(
+                    {
+                        "employee_id": emp["id"],
+                        "leave_type_id": sick_type["id"],
+                        "leave_name": name_by_id[sick_type["id"]],
+                        "total_days": total,
+                        "used_days": used,
+                        "remaining_days": total - used,
+                        "year": year,
+                    }
+                )
+
+        return success_response(
+            message="Leave balances fetched successfully.",
+            data={"balances": balances},
+        )
+    except Exception as e:
+        logger.error(f"get_all_leave_balances failed: {e}")
+        if hasattr(e, "status_code"):
+            raise
+        internal_server_error("Failed to fetch leave balances.")
+
+
 def get_my_leave_entitlements(auth_user_id: str):
     try:
         employee_id = get_employee_id_for_auth_user(auth_user_id)
@@ -890,12 +1185,13 @@ def get_my_leave_entitlements(auth_user_id: str):
         employee = employee_repo.get_by_id_or_404(employee_id, "Employee not found.")
 
         leave_types, _total = leave_type_repo.list(
-            select="id, leave_name, default_days, entitlement_mode, is_paid",
+            select="id, leave_name, default_days, entitlement_mode, is_paid, hr_managed",
             order_by="leave_name",
         )
 
         current_year = datetime.now(timezone.utc).year
         entitlements = []
+        scheme = get_leave_scheme(employee)
 
         for leave_type in leave_types:
             leave_type_id = leave_type["id"]
@@ -907,9 +1203,25 @@ def get_my_leave_entitlements(auth_user_id: str):
             # eligible for a leave type never sees it here, full stop —
             # this is the fix for e.g. Maternity Leave rendering for a
             # male employee.
-            eligible, reason = evaluate_leave_eligibility(employee, leave_type_id)
+            # Who sees what (Singapore leave rules): Hospitalisation and
+            # Maternity are HR-only; MC-only staff see just MC and no
+            # balance; the Singapore list sees Annual / MC / Replacement /
+            # Childcare (Childcare only where HR has set it up).
+            eligible, reason = evaluate_self_apply_access(employee, leave_type)
             if not eligible:
                 continue
+
+            if scheme == SCHEME_SG_LIST and leave_name == CHILDCARE_LEAVE:
+                has_childcare = balance_repo.find_one(
+                    {
+                        "employee_id": employee_id,
+                        "leave_type_id": leave_type_id,
+                        "year": current_year,
+                    },
+                    select="id",
+                )
+                if not has_childcare:
+                    continue
 
             entry = {
                 "leave_type_id": leave_type_id,
@@ -921,6 +1233,7 @@ def get_my_leave_entitlements(auth_user_id: str):
                 "remaining_days": None,
                 "unlimited": False,
                 "tier_not_assigned": False,
+                "show_balance": True,
             }
 
             if mode == "not_a_balance":
@@ -1020,6 +1333,14 @@ def _resolve_days_for_employee(employee: dict, leave_type: dict) -> Optional[int
         return leave_type.get("default_days") or 0
 
     if mode == "tiered":
+        # A number typed on the user form (employee_leave_overrides) wins
+        # over the tier; assigning a tier later clears it again.
+        override_days = _get_employee_leave_override_days(
+            employee["id"], leave_type["id"]
+        )
+        if override_days is not None:
+            return override_days
+
         assignment = get_employee_leave_tier(employee["id"], leave_type["id"])
 
         if not assignment or not assignment.get("leave_policy_tiers"):
@@ -1057,7 +1378,7 @@ def generate_yearly_leave_balances(year: Optional[int] = None, current_user=None
         ]
 
         employees, _total = employee_repo.list(
-            select="id, joining_date, nationality, marital_status, gender, employment_status",
+            select="id, joining_date, nationality, marital_status, gender, employment_status, leave_scheme",
             filters={"employment_status": "Active"},
         )
 
@@ -1068,6 +1389,15 @@ def generate_yearly_leave_balances(year: Optional[int] = None, current_user=None
 
         for employee in employees:
             for leave_type in applicable_types:
+                # MC-only staff get an MC balance (hidden from them) and
+                # nothing else.
+                if (
+                    get_leave_scheme(employee) == SCHEME_MC_ONLY
+                    and (leave_type.get("leave_name") or "").strip().upper()
+                    != SICK_LEAVE
+                ):
+                    continue
+
                 eligible, _reason = evaluate_leave_eligibility(
                     employee, leave_type["id"]
                 )

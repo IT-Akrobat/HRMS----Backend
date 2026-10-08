@@ -38,3 +38,61 @@ alter table leave_balances
 
 -- leave_requests.total_days stays INTEGER on purpose: apply_leave() computes it
 -- as whole calendar days, so half-day *applications* are not supported yet.
+
+-- =====================================================================
+-- Singapore leave rules (Leave_Record_for_App.xlsx request)
+-- Run AFTER 033.sql (which already contains the half-day numeric change
+-- for leave_balances). Safe to re-run.
+-- =====================================================================
+
+-- 1. Who gets which leave scheme -----------------------------------------
+--   SG_LIST   : on the Singapore leave sheet -> Annual, MC, Replacement,
+--               Childcare (only if tier assigned). Sees balances.
+--   MC_ONLY   : everyone else in Singapore -> MC application only,
+--               no balances shown.
+--   STANDARD  : previous behaviour (Chennai staff etc.), unchanged.
+alter table employees add column if not exists leave_scheme text not null default 'MC_ONLY';
+alter table employees drop constraint if exists employees_leave_scheme_check;
+alter table employees add constraint employees_leave_scheme_check
+    check (leave_scheme in ('SG_LIST', 'MC_ONLY', 'STANDARD'));
+
+-- Chennai / India staff keep their existing leave behaviour.
+update employees set leave_scheme = 'STANDARD'
+where work_location ilike '%chennai%' or work_location ilike '%india%'
+   or id in (select employee_id from employee_leave_overrides);
+
+-- 2. One leave manager per employee ---------------------------------------
+alter table employees add column if not exists leave_manager_id uuid references employees(id) on delete set null;
+create index if not exists idx_employees_leave_manager on employees(leave_manager_id);
+
+-- 3. HR/Super-Admin-only leave types (Hospitalisation, Maternity) ----------
+alter table leave_types add column if not exists hr_managed boolean not null default false;
+update leave_types set hr_managed = true
+where leave_name in ('HOSPITALISATION LEAVE', 'MATERNITY LEAVE');
+
+-- 4. Half days + balance hold on apply -------------------------------------
+alter table leave_requests alter column total_days type numeric(4,1) using total_days::numeric;
+alter table leave_requests add column if not exists is_half_day boolean not null default false;
+-- true once the days have been taken out of the balance (done at apply time)
+alter table leave_requests add column if not exists balance_deducted boolean not null default false;
+-- replacement credits held by this request: [{"credit_id": "...", "days": 1}]
+alter table leave_requests add column if not exists replacement_allocation jsonb;
+
+alter table leave_replacement_credits add column if not exists days numeric(3,1) not null default 1;
+alter table leave_replacement_credits add column if not exists used_days numeric(3,1) not null default 0;
+update leave_replacement_credits set used_days = days where used = true and used_days = 0;
+
+-- 5. Medical certificate (MC) flow ------------------------------------------
+-- mc_status: AWAITING_CERTIFICATE -> CERTIFICATE_UPLOADED -> VALIDATED
+alter table leave_requests add column if not exists mc_status text;
+alter table leave_requests add column if not exists mc_certificate_path text;
+alter table leave_requests add column if not exists mc_certificate_name text;
+alter table leave_requests add column if not exists mc_uploaded_at timestamp;
+alter table leave_requests add column if not exists mc_validated_by uuid references employees(id) on delete set null;
+alter table leave_requests add column if not exists mc_validated_at timestamp;
+alter table leave_requests add column if not exists mc_reminder_sent_at timestamp;
+alter table leave_requests drop constraint if exists leave_requests_mc_status_check;
+alter table leave_requests add constraint leave_requests_mc_status_check
+    check (mc_status is null or mc_status in ('AWAITING_CERTIFICATE', 'CERTIFICATE_UPLOADED', 'VALIDATED'));
+create index if not exists idx_leave_requests_mc_pending
+    on leave_requests(applied_date) where mc_status is not null and mc_status <> 'VALIDATED';

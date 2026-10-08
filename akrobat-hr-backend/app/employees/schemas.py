@@ -1,11 +1,12 @@
 import re
 from datetime import date, datetime
-from typing import Optional
+from typing import List, Optional, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from app.core.constants import ACTIVE
+from app.leaves.schemas import LeaveEntitlementInput
 
 WORKING_DAYS_PER_WEEK_OPTIONS = (5, 5.5, 6)
 
@@ -125,6 +126,12 @@ class EmployeeCreate(BaseModel):
 
     childcare_leave_tier_id: Optional[UUID] = None
 
+    # Days typed into the "Leave days" inputs on the Create User form
+    # (Annual, Medical, Replacement, Childcare, Maternity, Paternity and any
+    # HR-added leave type). See app/leaves/entitlement_services.py.
+    # Only entries HR actually filled in are sent.
+    leave_entitlements: Optional[List[LeaveEntitlementInput]] = None
+
     # Drives the Unpaid Leave payroll deduction (Unpaid Leave itself
     # never gets a leave_balances row -- see
     # app/leaves/policy_services.py). 5 / 5.5 / 6 per the Leave Info doc.
@@ -159,14 +166,9 @@ class EmployeeCreate(BaseModel):
     # Saturday. See sql/034.sql and app/attendance/services.py.
     saturday_shift_id: Optional[UUID] = None
 
-    # "Chennai Leave Default" checkbox on the Create User form. When
-    # true, Sick Leave and Casual Leave are both set to 12 days for
-    # THIS employee only (via employee_leave_overrides -- see
-    # app/leaves/policy_services.py apply_chennai_leave_default()).
-    # Every other employee is unaffected either way. Not a stored
-    # employees column -- consumed in app/employees/services.py and
-    # dropped before the employees row insert.
-    chennai_leave_default: bool = Field(default=False)
+    # Leave setup (sql/034_sg_leave_rules.sql)
+    leave_manager_id: Optional[UUID] = None
+    leave_scheme: Literal["SG_LIST", "MC_ONLY", "STANDARD"] = "MC_ONLY"
 
 
 # ==========================================
@@ -265,6 +267,9 @@ class EmployeeUpdate(BaseModel):
     annual_leave_tier_id: Optional[UUID] = None
     childcare_leave_tier_id: Optional[UUID] = None
 
+    # Only the days HR changed on the Edit User form.
+    leave_entitlements: Optional[List[LeaveEntitlementInput]] = None
+
     working_days_per_week: Optional[float] = None
 
     @field_validator("working_days_per_week")
@@ -280,7 +285,8 @@ class EmployeeUpdate(BaseModel):
 
     saturday_shift_id: Optional[UUID] = None
 
-    chennai_leave_default: Optional[bool] = None
+    leave_manager_id: Optional[UUID] = None
+    leave_scheme: Optional[Literal["SG_LIST", "MC_ONLY", "STANDARD"]] = None
 
     # Ad-hoc outdoor/meeting check-in (sql/030.sql). Off by default for
     # every employee -- HR/Admin flips this per-person for whoever
@@ -308,6 +314,8 @@ class EmployeeResponse(BaseModel):
     department_id: Optional[UUID]
     designation_id: Optional[UUID]
     manager_id: Optional[UUID]
+    leave_manager_id: Optional[UUID] = None
+    leave_scheme: Optional[str] = None
     shift_id: Optional[UUID]
 
     joining_date: Optional[date]

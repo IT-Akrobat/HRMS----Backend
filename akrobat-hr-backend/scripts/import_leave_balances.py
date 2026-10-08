@@ -4,7 +4,7 @@ Import the 2026 Singapore leave sheet into leave_balances.
     python scripts/import_leave_balances.py Leave_Record_for_App.xlsx            # dry run
     python scripts/import_leave_balances.py Leave_Record_for_App.xlsx --commit   # write
 
-Run sql/034_leave_half_days.sql first (half-day values need numeric columns).
+Run sql/033.sql (half-day columns) and sql/034_sg_leave_rules.sql first.
 
 Mapping (sheet column -> leave_balances row for --year, default 2026):
 
@@ -17,9 +17,12 @@ Mapping (sheet column -> leave_balances row for --year, default 2026):
   Childcare      only where the sheet has an entitlement (2 employees); also sets
                  employee_leave_tier to the 6 DAYS / 2 DAYS tier
   Maternity      not imported (sheet column is empty; HR/Super Admin manage it)
-  Replacement    NOT imported unless --replacement-ph-date and --replacement-expiry
-                 are given. The app stores one credit row per whole day, so
-                 half-day figures (0.5) are reported and skipped.
+  Replacement    imported only if --replacement-ph-date and --replacement-expiry
+                 are given. One credit row per employee holding the sheet's
+                 figure (half days like 0.5 are supported, sql/034).
+  Scheme         every employee on the sheet gets employees.leave_scheme =
+                 'SG_LIST' (Annual / MC / Replacement / Childcare, sees
+                 balances). Everyone else stays MC_ONLY.
 
 Employees are matched to employees.full_name. Anything that doesn't match
 exactly one employee is reported and skipped -- nothing is guessed.
@@ -218,18 +221,13 @@ def main():
             plan.append(bal("CHILDCARE LEAVE", r["cc_ent"], r["cc_taken"]))
             plan[-1]["_tier"] = f"{int(r['cc_ent'])} DAYS"
         if r["repl"]:
-            if r["repl"] != int(r["repl"]):
-                skipped_repl.append(
-                    f"{r['name']}: {r['repl']} day(s) -- half days can't be stored as credits"
+            plan.append(
+                dict(
+                    _replacement=r["repl"],
+                    employee_id=emp["id"],
+                    _name=r["name"],
                 )
-            else:
-                plan.append(
-                    dict(
-                        _replacement=int(r["repl"]),
-                        employee_id=emp["id"],
-                        _name=r["name"],
-                    )
-                )
+            )
 
     print(
         f"{len(rows)} employees in sheet, {len({p['employee_id'] for p in plan})} matched\n"
@@ -238,7 +236,7 @@ def main():
     for p in plan:
         if "_replacement" in p:
             print(
-                f"{p['_name'][:35]:36} {'REPLACEMENT (credits)':22} {p['_replacement']:>6}"
+                f"{p['_name'][:35]:36} {'REPLACEMENT (days)':22} {p['_replacement']:>6g}"
             )
         else:
             print(
@@ -266,14 +264,14 @@ def main():
         if "_replacement" in p:
             if not repl_ok:
                 continue
-            for _ in range(p["_replacement"]):
-                db.table("leave_replacement_credits").insert(
-                    dict(
-                        employee_id=p["employee_id"],
-                        public_holiday_date=args.replacement_ph_date,
-                        expiry_date=args.replacement_expiry,
-                    )
-                ).execute()
+            db.table("leave_replacement_credits").insert(
+                dict(
+                    employee_id=p["employee_id"],
+                    public_holiday_date=args.replacement_ph_date,
+                    expiry_date=args.replacement_expiry,
+                    days=p["_replacement"],
+                )
+            ).execute()
             continue
         row = {k: v for k, v in p.items() if not k.startswith("_")}
         db.table("leave_balances").upsert(
@@ -288,7 +286,12 @@ def main():
                 ),
                 on_conflict="employee_id,leave_type_id",
             ).execute()
-    print("\nDone.")
+    # Everyone on the sheet is on the Singapore list scheme.
+    for emp_id in {p["employee_id"] for p in plan}:
+        db.table("employees").update({"leave_scheme": "SG_LIST"}).eq(
+            "id", emp_id
+        ).execute()
+    print("\nDone. leave_scheme set to SG_LIST for the matched employees.")
     if not repl_ok:
         print(
             "Replacement credits were NOT written (pass --replacement-ph-date and --replacement-expiry)."
