@@ -15,3 +15,26 @@ CREATE TABLE IF NOT EXISTS ot_adjustments (
 );
 
 CREATE INDEX IF NOT EXISTS ot_adjustments_date_idx ON ot_adjustments (attendance_date);
+
+
+
+-- 034_leave_half_days.sql
+--
+-- The 2026 Singapore leave sheet (Leave_Record_for_App.xlsx) carries half-day
+-- figures (e.g. 8.5 taken, 22.5 balance). leave_balances.* were created as
+-- INTEGER in 001_schema.sql, so those values cannot be stored as-is.
+--
+-- Run BEFORE scripts/import_leave_balances.py.
+
+alter table leave_balances
+    alter column total_days     type numeric(5,1) using total_days::numeric,
+    alter column used_days      type numeric(5,1) using used_days::numeric,
+    alter column remaining_days type numeric(5,1) using remaining_days::numeric;
+
+alter table leave_balances
+    alter column total_days     set default 0,
+    alter column used_days      set default 0,
+    alter column remaining_days set default 0;
+
+-- leave_requests.total_days stays INTEGER on purpose: apply_leave() computes it
+-- as whole calendar days, so half-day *applications* are not supported yet.
