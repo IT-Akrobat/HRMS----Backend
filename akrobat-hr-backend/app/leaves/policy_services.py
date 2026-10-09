@@ -22,6 +22,8 @@ and app/leaves/services.py apply_leave()).
 from datetime import date, datetime, timezone
 from typing import Optional
 
+from fastapi import HTTPException
+
 from app.core.database import supabase_admin
 from app.core.repository import SupabaseRepository
 from app.core.responses import success_response
@@ -928,6 +930,100 @@ def recompute_annual_leave_tenure_tiers(year: Optional[int] = None, current_user
 # is added later -- but tiered/event/not_a_balance types have their own
 # dedicated mechanisms (tier assignment / replacement credits / no
 # balance at all) and are rejected here on purpose.
+
+
+def set_leave_used_days(
+    employee_id: str,
+    leave_name: str,
+    used_days: float,
+    total_days: Optional[float] = None,
+    year: Optional[int] = None,
+    performed_by: Optional[str] = None,
+    request=None,
+):
+    """Sets leave_balances.used_days (and remaining = total - used) for one
+    employee / leave type / year. Creates the row if the employee has none."""
+    try:
+        employee_repo.get_by_id_or_404(employee_id, "Employee not found.")
+        leave_type = get_leave_type_or_404(leave_name)
+
+        if leave_type.get("entitlement_mode") in ("event", "not_a_balance"):
+            bad_request(
+                f"{leave_name.title()} has no yearly balance to edit here "
+                "(Replacement Leave is managed through its credits)."
+            )
+
+        used_days = round(float(used_days), 1)
+        target_year = year or datetime.now(timezone.utc).year
+
+        existing = balance_repo.find_one(
+            {
+                "employee_id": employee_id,
+                "leave_type_id": leave_type["id"],
+                "year": target_year,
+            },
+            select="id, total_days, used_days, remaining_days",
+        )
+
+        if existing:
+            total = float(existing.get("total_days") or 0)
+            if used_days > total:
+                bad_request(
+                    f"Used days ({used_days:g}) cannot be more than the "
+                    f"entitlement ({total:g})."
+                )
+            balance = balance_repo.update(
+                existing["id"],
+                {"used_days": used_days, "remaining_days": total - used_days},
+            )
+        else:
+            total = float(
+                total_days
+                if total_days is not None
+                else (leave_type.get("default_days") or 0)
+            )
+            if used_days > total:
+                bad_request(
+                    f"Used days ({used_days:g}) cannot be more than the "
+                    f"entitlement ({total:g})."
+                )
+            balance = balance_repo.create(
+                {
+                    "employee_id": employee_id,
+                    "leave_type_id": leave_type["id"],
+                    "year": target_year,
+                    "total_days": total,
+                    "used_days": used_days,
+                    "remaining_days": total - used_days,
+                }
+            )
+
+        record_audit_log(
+            module="LEAVE",
+            action="SET_LEAVE_USED",
+            performed_by=performed_by,
+            target_employee_id=employee_id,
+            record_id=balance.get("id"),
+            description=(
+                f"Set {leave_name.title()} taken for {target_year} to "
+                f"{used_days:g} day(s) (was "
+                f"{float((existing or {}).get('used_days') or 0):g})."
+            ),
+            new_values=balance,
+            request=request,
+        )
+
+        return success_response(
+            message=f"{leave_name.title()} updated: {used_days:g} day(s) taken.",
+            data=balance,
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception(e)
+        internal_server_error("Unable to update the leave balance.")
 
 
 def grant_leave_balance_days(

@@ -9,6 +9,7 @@ from app.leaves.schemas import (
     CreditReplacementLeaveRequest,
     GenerateYearlyBalancesRequest,
     GrantLeaveBalanceRequest,
+    SetLeaveUsedRequest,
     RecordHrManagedLeaveRequest,
     CreateLeaveTypeRequest,
 )
@@ -44,6 +45,7 @@ from app.leaves.policy_services import (
     recompute_annual_leave_tenure_tiers,
     get_my_leave_entitlements,
     grant_leave_balance_days,
+    set_leave_used_days,
     get_all_leave_balances,
 )
 from app.core.helpers.employee_helper import get_employee_id_for_auth_user
@@ -298,6 +300,25 @@ def grant_balance(
         data.days,
         granted_by=get_employee_id_for_auth_user(user.id),
         year=data.year,
+        request=request,
+    )
+
+
+@router.put("/policy/set-used")
+def set_used(
+    data: SetLeaveUsedRequest,
+    request: Request,
+    user=Depends(require_permission("EDIT_EMPLOYEE")),
+):
+    """HR/Super Admin: correct the days an employee has already taken for a
+    balance-based leave type (e.g. Sick Leave / MC). Remaining is recomputed."""
+    return set_leave_used_days(
+        str(data.employee_id),
+        data.leave_type,
+        data.used_days,
+        total_days=data.total_days,
+        year=data.year,
+        performed_by=get_employee_id_for_auth_user(user.id),
         request=request,
     )
 

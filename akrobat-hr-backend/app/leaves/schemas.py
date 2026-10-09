@@ -53,6 +53,17 @@ class GrantLeaveBalanceRequest(BaseModel):
     year: Optional[int] = None
 
 
+class SetLeaveUsedRequest(BaseModel):
+    """HR correcting how many days an employee has already taken."""
+
+    employee_id: UUID
+    leave_type: str  # e.g. "SICK LEAVE"
+    used_days: float = Field(ge=0, le=365)
+    year: Optional[int] = None
+    # Only needed when the employee has no balance row yet.
+    total_days: Optional[float] = Field(default=None, ge=0, le=365)
+
+
 class RecordHrManagedLeaveRequest(BaseModel):
     """HR / Super Admin recording Hospitalisation or Maternity leave."""
 
