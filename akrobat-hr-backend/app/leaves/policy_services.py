@@ -394,6 +394,9 @@ def credit_replacement_leave(
 
 def get_replacement_leave_credits(employee_id: str):
     try:
+        from app.leaves.replacement_sync import sync_replacement_credits
+
+        sync_replacement_credits([employee_id])
         credits, _total = replacement_credit_repo.list(
             select="*",
             filters={"employee_id": employee_id},
@@ -409,6 +412,10 @@ def get_replacement_leave_credits(employee_id: str):
 
 
 def _unused_credit_rows(employee_id: str) -> list:
+    # Grant any Sunday/Saturday public-holiday credits not yet on file.
+    from app.leaves.replacement_sync import sync_replacement_credits
+
+    sync_replacement_credits([employee_id])
     today = date.today().isoformat()
     response = (
         supabase_admin.table("leave_replacement_credits")
@@ -1074,6 +1081,9 @@ def get_all_leave_balances(year: Optional[int] = None):
             None,
         )
         if replacement_type_id:
+            from app.leaves.replacement_sync import sync_replacement_credits
+
+            sync_replacement_credits()
             today = date.today().isoformat()
             credits = (
                 supabase_admin.table("leave_replacement_credits")

@@ -1,3 +1,5 @@
+from datetime import date
+
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 
 from app.leaves.schemas import (
@@ -24,6 +26,7 @@ from app.leaves.services import (
     get_team_leaves,
     update_leave_status,
     record_hr_managed_leave,
+    preview_leave_days,
 )
 from app.leaves.mc_services import (
     upload_medical_certificate,
@@ -65,6 +68,22 @@ def create_leave(
     data: CreateLeaveRequest, request: Request, user=Depends(get_current_user)
 ):
     return apply_leave(user.id, data, request=request)
+
+
+# ==========================================
+# PREVIEW LEAVE DAYS (working days for a date range)
+# Declared before any "/{leave_id}" route.
+# ==========================================
+
+
+@router.get("/preview-days")
+def leave_days_preview(
+    from_date: date,
+    to_date: date,
+    half_day: bool = False,
+    user=Depends(get_current_user),
+):
+    return preview_leave_days(user.id, from_date, to_date, half_day)
 
 
 # ==========================================

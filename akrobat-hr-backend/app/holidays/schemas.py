@@ -16,10 +16,9 @@ class BulkImportHolidayItem(BaseModel):
     holiday_name: str
     # The real calendar date the holiday falls on, e.g. from the MOM
     # list (https://www.mom.gov.sg/employment-practices/public-holidays).
-    # If this lands on a Sunday, holiday_date is auto-computed as the
-    # following Monday (MOM's Sunday-shift rule) and raw_holiday_date
-    # keeps the real date so Saturday-PH detection (Replacement Leave)
-    # still works off the actual day of week.
+    # Stored as-is: a Sunday holiday stays on the Sunday (no Monday
+    # shift) and credits everyone 1 Replacement Leave; a Saturday holiday
+    # credits Replacement Leave to those who don't work a full Saturday.
     raw_holiday_date: date
     description: Optional[str] = None
     country: str = "SG"

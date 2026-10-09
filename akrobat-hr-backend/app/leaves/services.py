@@ -20,6 +20,7 @@ from app.core import realtime
 from app.notifications.services import notify_employee
 from app.notification_preferences.services import get_preference
 from app.core.permissions import get_role_name_for_auth_user
+from app.leaves.working_days import calculate_leave_days
 from app.leaves.policy_services import (
     SICK_LEAVE,
     evaluate_self_apply_access,
@@ -87,16 +88,20 @@ def apply_leave(auth_user_id: str, data, request: Optional[Request] = None):
 
         leave_type = _resolve_leave_type(data.leave_type)
         leave_type_id = leave_type["id"]
-        if getattr(data, "half_day", False):
-            if data.from_date != data.to_date:
-                bad_request("A half-day leave must be for a single date.")
-            total_days = 0.5
-        else:
-            total_days = (data.to_date - data.from_date).days + 1
 
         applicant_record = employee_repo.get_by_id_or_404(
             employee_id, "Employee not found."
         )
+
+        # Working days only: Sundays and public holidays are skipped, and
+        # Saturdays count 0 / 0.5 / 1 according to the employee's own
+        # Saturday schedule (see app/leaves/working_days.py).
+        total_days = calculate_leave_days(
+            applicant_record,
+            data.from_date,
+            data.to_date,
+            half_day=bool(getattr(data, "half_day", False)),
+        )["total_days"]
 
         # Eligibility (nationality/marital_status/gender/office-vs-field
         # exclusions from leave_eligibility_rules) — e.g. foreigners
@@ -243,6 +248,27 @@ def apply_leave(auth_user_id: str, data, request: Optional[Request] = None):
     except Exception as e:
         logger.exception(e)
         internal_server_error("Unable to apply for leave.")
+
+
+# ==========================================
+# PREVIEW LEAVE DAYS (self-service) — the same count apply_leave() will
+# store, so the Apply Leave screen shows exactly what will be deducted.
+# ==========================================
+
+
+def preview_leave_days(auth_user_id: str, from_date, to_date, half_day: bool = False):
+    try:
+        employee_id = get_employee_id_for_auth_user(auth_user_id)
+        if not employee_id:
+            forbidden("No employee profile is linked to this account.")
+        employee = employee_repo.get_by_id_or_404(employee_id, "Employee not found.")
+        result = calculate_leave_days(employee, from_date, to_date, half_day)
+        return success_response(message="Leave days calculated.", data=result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(e)
+        internal_server_error("Unable to calculate leave days.")
 
 
 # ==========================================
@@ -595,7 +621,9 @@ def record_hr_managed_leave(auth_user_id: str, data, request: Optional[Request] 
 
         employee_id = str(data.employee_id)
         employee = employee_repo.get_by_id_or_404(employee_id, "Employee not found.")
-        total_days = (data.to_date - data.from_date).days + 1
+        total_days = calculate_leave_days(employee, data.from_date, data.to_date)[
+            "total_days"
+        ]
 
         validate_leave_request_against_entitlement(employee, leave_type, total_days)
 

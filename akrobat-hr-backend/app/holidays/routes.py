@@ -35,8 +35,8 @@ def bulk_import(
     user=Depends(require_permission("EDIT_EMPLOYEE")),
 ):
     """HR: populate holidays for a year from an external list (e.g. MOM's
-    public holiday list). Sunday-shift is applied automatically -- pass
-    each holiday's real calendar date as raw_holiday_date."""
+    public holiday list). Pass each holiday's real calendar date as raw_holiday_date
+    (no Sunday->Monday shift is applied)."""
     return bulk_import_holidays(data.holidays)
 
 

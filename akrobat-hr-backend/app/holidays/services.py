@@ -47,12 +47,11 @@ def _country_variants(country: str) -> list[str]:
 
 def _apply_sunday_shift(raw_date: date) -> tuple[date, bool]:
     """
-    MOM's rule: a public holiday that falls on a Sunday is observed the
-    following Monday. Returns (observed_date, was_shifted).
+    No longer shifts. A public holiday that falls on a Sunday stays on the
+    Sunday (nobody gets the Monday off); instead every employee is credited
+    1 Replacement Leave -- see app/leaves/replacement_sync.py. Kept as a
+    function so existing callers/imports keep working.
     """
-
-    if raw_date.weekday() == 6:  # Monday=0 ... Sunday=6
-        return raw_date + timedelta(days=1), True
 
     return raw_date, False
 
@@ -239,6 +238,8 @@ def create_holiday(data):
                 {
                     "holiday_name": data.holiday_name,
                     "holiday_date": data.holiday_date,
+                    "raw_holiday_date": str(data.holiday_date),
+                    "is_sunday_shifted": False,
                     "description": data.description,
                     "country": _normalize_country(data.country),
                 }
