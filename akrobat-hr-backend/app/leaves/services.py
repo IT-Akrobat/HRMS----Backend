@@ -65,10 +65,14 @@ def get_hr_employee_ids() -> list:
 
 
 def get_leave_manager_id(employee_row: Optional[dict]) -> Optional[str]:
-    """Each employee has 1 leave manager; falls back to the reporting manager."""
+    """Who approves this employee's leave: their REPORTING MANAGER
+    (employees.manager_id), whatever that manager's role is. Only if an
+    employee somehow has no reporting manager do we fall back to the old
+    employees.leave_manager_id. Super Admin does not approve -- they only
+    view (see update_leave_status)."""
     if not employee_row:
         return None
-    return employee_row.get("leave_manager_id") or employee_row.get("manager_id")
+    return employee_row.get("manager_id") or employee_row.get("leave_manager_id")
 
 
 # ==========================================
@@ -187,9 +191,10 @@ def apply_leave(auth_user_id: str, data, request: Optional[Request] = None):
         day_text = f"{total_days:g} day{'s' if total_days != 1 else ''}"
         label = "MC" if is_mc else data.leave_type
 
-        # The employee's leave manager approves, and every Super Admin is
-        # told as well (they can see and decide any request). If no leave
-        # manager is assigned, Super Admin is the only recipient.
+        # The employee's reporting manager approves; every Super Admin is
+        # told as well, but only so they can SEE the request (they do not
+        # approve). If the employee has no reporting manager at all, Super
+        # Admin is the fallback approver.
         recipients = {}
         if leave_manager_id:
             recipients[leave_manager_id] = (
@@ -203,9 +208,9 @@ def apply_leave(auth_user_id: str, data, request: Optional[Request] = None):
                     f"{applicant_name} applied for {label} from {data.from_date} to "
                     f"{data.to_date} ({day_text}). "
                     + (
-                        "Sent to their leave manager for approval."
+                        "Sent to their reporting manager for approval."
                         if leave_manager_id
-                        else "No leave manager is assigned."
+                        else "No reporting manager is assigned, so it needs your approval."
                     )
                 ),
             )
@@ -447,9 +452,11 @@ def get_team_leaves(auth_user_id: str):
 
 # ==========================================
 # APPROVE / REJECT LEAVE
-# (route-gated to SUPER ADMIN only — see app/leaves/routes.py. The only
-#  check left here is that a SUPER ADMIN who is also an employee record
-#  can't approve their own leave request.)
+# Only the employee's REPORTING MANAGER may decide (any role -- being
+# someone's reporting manager is what counts, not the role name). Super
+# Admin can view every request but cannot approve/reject, except as a
+# safety net when the employee has no reporting manager assigned. Nobody
+# can decide their own request.
 # ==========================================
 
 
@@ -473,18 +480,22 @@ def update_leave_status(
         target_employee_id = existing.get("employee_id")
         approver_employee_id = get_employee_id_for_auth_user(auth_user_id)
 
-        # Who may decide: the employee's leave manager, or Super Admin.
+        # Who may decide: the employee's reporting manager only. Super
+        # Admin is view-only -- unless nobody is assigned to approve.
         target_row = employee_repo.get_by_id(
             target_employee_id, select="manager_id, leave_manager_id"
         )
-        is_super_admin = get_role_name_for_auth_user(auth_user_id) == ADMIN
-        is_leave_manager = bool(
-            approver_employee_id
-            and approver_employee_id == get_leave_manager_id(target_row)
+        assigned_approver_id = get_leave_manager_id(target_row)
+        is_reporting_manager = bool(
+            approver_employee_id and approver_employee_id == assigned_approver_id
         )
-        if not (is_super_admin or is_leave_manager):
+        is_fallback_super_admin = (
+            not assigned_approver_id
+            and get_role_name_for_auth_user(auth_user_id) == ADMIN
+        )
+        if not (is_reporting_manager or is_fallback_super_admin):
             forbidden(
-                "Only the employee's leave manager or Super Admin can approve or reject this leave."
+                "Only the employee's reporting manager can approve or reject this leave."
             )
 
         if approver_employee_id and approver_employee_id == target_employee_id:

@@ -15,6 +15,7 @@ from app.access_control.services import (
 )
 from app.core.audit import record_audit_log
 from app.core.database import supabase_admin
+from app.core.logger import logger
 from app.core.exceptions import bad_request, forbidden, unauthorized
 from app.core.database import supabase
 from app.core.helpers.employee_helper import (
@@ -393,6 +394,32 @@ def get_me(auth_user) -> dict:
         )
         manager = manager_response.data if manager_response else None
 
+    # True when somebody reports to this person -- i.e. they approve leave
+    # for them. Drives the "Team Leave Requests" menu item for ANY role.
+    is_reporting_manager = False
+    if employee.get("id"):
+        # Two separate lookups (instead of one .or_()) so a failure in one
+        # -- e.g. employees.leave_manager_id missing because sql/033.sql
+        # hasn't been run on this database -- can't hide a valid result
+        # from the other. The old single query swallowed that error and
+        # silently returned False for everyone.
+        for column in ("manager_id", "leave_manager_id"):
+            try:
+                reports = (
+                    supabase_admin.table("employees")
+                    .select("id")
+                    .eq(column, employee["id"])
+                    .limit(1)
+                    .execute()
+                )
+                if reports.data:
+                    is_reporting_manager = True
+                    break
+            except Exception as e:
+                logger.error(
+                    f"Failed to check reporting-manager status via {column}: {e}"
+                )
+
     permissions = get_permissions_for_role(role_id, role_name)
     sidebar = build_sidebar(role_name, role_id)
     allowed_modules = [item["key"] for item in sidebar]
@@ -461,5 +488,6 @@ def get_me(auth_user) -> dict:
             # sql/030.sql. False for everyone until HR enables it
             # per-employee.
             "outdoor_checkin_enabled": bool(employee.get("outdoor_checkin_enabled")),
+            "is_reporting_manager": is_reporting_manager,
         },
     }

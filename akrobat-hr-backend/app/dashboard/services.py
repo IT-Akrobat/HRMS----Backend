@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from app.core.database import supabase_admin
 from app.core.config import PEXELS_API_KEY, PEXELS_SEARCH_QUERY, QUOTE_API_URL
 from app.core.logger import logger
+from app.core.helpers.employee_helper import get_super_admin_employee_ids
 
 # Same "today" the attendance module files check-ins under (company-local
 # calendar day), so the dashboard's Today/Week/Month windows line up with
@@ -46,11 +47,13 @@ def get_admin_dashboard():
 
         today = str(date.today())
 
+        sa_ids = get_super_admin_employee_ids()  # Super Admins are not counted
+
         employees = supabase_admin.table("employees").select("id").execute()
 
         attendance = (
             supabase_admin.table("attendance")
-            .select("id")
+            .select("id, employee_id")
             .eq("attendance_date", today)
             .execute()
         )
@@ -63,7 +66,7 @@ def get_admin_dashboard():
         # this leave's range covering today" against the real table.
         leaves = (
             supabase_admin.table("leave_requests")
-            .select("id")
+            .select("id, employee_id")
             .eq("status", "Approved")
             .lte("start_date", today)
             .gte("end_date", today)
@@ -78,17 +81,19 @@ def get_admin_dashboard():
 
         late = (
             supabase_admin.table("attendance")
-            .select("id")
+            .select("id, employee_id")
             .eq("attendance_date", today)
             .gt("late_minutes", 0)
             .execute()
         )
 
-        total_employees = len(employees.data)
+        total_employees = len([e for e in employees.data if e["id"] not in sa_ids])
 
-        present_today = len(attendance.data)
+        present_today = len(
+            [r for r in attendance.data if r.get("employee_id") not in sa_ids]
+        )
 
-        on_leave = len(leaves.data)
+        on_leave = len([r for r in leaves.data if r.get("employee_id") not in sa_ids])
 
         total_departments = len(departments.data)
 
@@ -96,7 +101,7 @@ def get_admin_dashboard():
 
         total_shifts = len(shifts.data)
 
-        late_today = len(late.data)
+        late_today = len([r for r in late.data if r.get("employee_id") not in sa_ids])
 
         absent_today = max(0, total_employees - present_today - on_leave)
 
@@ -129,13 +134,21 @@ def get_attendance_trend(days: int = 7):
 
         start = end - timedelta(days=days - 1)
 
+        sa_ids = get_super_admin_employee_ids()  # Super Admins are not counted
+
         total_employees = len(
-            _fetch_all(lambda: supabase_admin.table("employees").select("id"))
+            [
+                e
+                for e in _fetch_all(
+                    lambda: supabase_admin.table("employees").select("id")
+                )
+                if e.get("id") not in sa_ids
+            ]
         )
 
         attendance_rows = _fetch_all(
             lambda: supabase_admin.table("attendance")
-            .select("attendance_date, late_minutes")
+            .select("employee_id, attendance_date, late_minutes")
             .gte("attendance_date", start.isoformat())
             .lte("attendance_date", end.isoformat())
             .order("id")
@@ -146,7 +159,7 @@ def get_attendance_trend(days: int = 7):
         # above (real table is "leave_requests", not "leaves").
         leave_rows = _fetch_all(
             lambda: supabase_admin.table("leave_requests")
-            .select("start_date, end_date")
+            .select("employee_id, start_date, end_date")
             .eq("status", "Approved")
             .lte("start_date", end.isoformat())
             .gte("end_date", start.isoformat())
@@ -166,6 +179,8 @@ def get_attendance_trend(days: int = 7):
             cursor += timedelta(days=1)
 
         for row in attendance_rows:
+            if row.get("employee_id") in sa_ids:
+                continue
             bucket = buckets.get(row.get("attendance_date"))
             if not bucket:
                 continue
@@ -174,6 +189,8 @@ def get_attendance_trend(days: int = 7):
                 bucket["late"] += 1
 
         for row in leave_rows:
+            if row.get("employee_id") in sa_ids:
+                continue
             row_start = row.get("start_date")
             row_end = row.get("end_date")
             if not row_start or not row_end:
@@ -238,7 +255,8 @@ def get_attendance_trend_detail(days: int = 7, status: str = "onTime"):
             )
             .order("id")
         )
-        emp_by_id = {e["id"]: e for e in employees}
+        sa_ids = get_super_admin_employee_ids()  # Super Admins are not counted
+        emp_by_id = {e["id"]: e for e in employees if e["id"] not in sa_ids}
 
         def to_person(employee_id, day_count):
             emp = emp_by_id.get(employee_id)
@@ -606,6 +624,9 @@ def get_top_performers(days: int = 30, limit: int = 5):
             .data
             or []
         )
+
+        sa_ids = get_super_admin_employee_ids()  # Super Admins are not ranked
+        rows = [r for r in rows if r.get("employee_id") not in sa_ids]
 
         by_employee = {}
         for row in rows:

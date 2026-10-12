@@ -91,6 +91,14 @@ class MeProfile(BaseModel):
     # response_model validation, same as the fields above once did.
     outdoor_checkin_enabled: Optional[bool] = None
 
+    # True when at least one employee reports to this person (manager_id
+    # or leave_manager_id points at them). Drives the "Team Leave
+    # Requests" menu item + route guard on the frontend for ANY role.
+    # Must stay declared here or response_model silently strips it and
+    # the menu never appears for plain employees who are reporting
+    # managers.
+    is_reporting_manager: Optional[bool] = False
+
 
 class MeResponse(BaseModel):
     id: str

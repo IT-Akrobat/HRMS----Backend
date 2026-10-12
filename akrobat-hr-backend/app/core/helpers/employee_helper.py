@@ -750,3 +750,16 @@ def get_user_profile(employee_id: str):
     )
 
     return response.data[0] if response.data else None
+
+
+def get_super_admin_employee_ids() -> set:
+    """
+    employees.id of every SUPER ADMIN. Super Admins are NOT part of the
+    attendance statistics -- they are left out of present / absent / late /
+    on-leave counts, dashboards and reports (they have no shift to be late
+    against). Fails open (empty set) if the lookup breaks, so a hiccup here
+    can never hide real employees.
+    """
+    from app.core.constants import ADMIN as _ADMIN_ROLE
+
+    return set(get_employee_ids_for_role(_ADMIN_ROLE))

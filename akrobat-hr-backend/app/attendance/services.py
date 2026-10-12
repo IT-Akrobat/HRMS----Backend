@@ -18,6 +18,7 @@ from app.core.helpers.employee_helper import (
     is_manager_of,
     get_all_report_ids,
     get_employee_ids_for_role,
+    get_super_admin_employee_ids,
     get_field_employee_ids,
     is_operation_every_saturday_name,
     OPERATION_SATURDAY_AREA,
@@ -27,7 +28,11 @@ from app.core.database import supabase_admin
 from app.core import realtime
 from app.notifications.services import notify_employee
 from app.attendance.ot import compute_ot
-from app.attendance.tz_helper import resolve_record_timezone
+from app.attendance.tz_helper import (
+    resolve_record_timezone,
+    timezone_from_coordinates,
+    timezone_from_work_location,
+)
 
 attendance_repo = SupabaseRepository("attendance")
 correction_repo = SupabaseRepository("attendance_corrections")
@@ -120,43 +125,42 @@ def _now_utc() -> datetime:
 # Late list (the reverse happens when the company is set to Singapore).
 #
 # So lateness / scheduled-time maths now resolves the zone per employee,
-# from their profile, in this order:
-#   1. work_location  (where they physically work -- free text)
-#   2. nationality    (the HR-set country picker)
+# in this order (same rules as app/attendance/tz_helper.py, which the
+# attendance reports already use to show times):
+#   1. GPS of the check-in / check-out  (where they physically are today)
+#   2. work_location  (free text -- "Singapore" / "India")
 #   3. the company timezone from Settings (previous behaviour)
-# Matching is a loose "mentions the country" check, same approach as the
-# holiday card used, so "Singapore", "Singaporean" and "SINGAPORE " all
-# resolve the same way.
+# Nationality is deliberately NOT used. It says nothing about where the
+# person works: an Indian national working in the Singapore office has
+# nationality "India", so judging them by it measured their 08:31 SGT
+# check-in against an 08:30 IST start (three and a half hours EARLY) and
+# they never showed in the dashboard's Late list.
 # --------------------------------------------------------------------------
-_COUNTRY_TIMEZONE_HINTS = (
-    (re.compile(r"singapore|singaporean", re.I), "Asia/Singapore"),
-    (re.compile(r"india|indian", re.I), "Asia/Kolkata"),
-)
 
 
-def _timezone_from_profile(work_location, nationality) -> Optional[ZoneInfo]:
-    for text in (work_location, nationality):
-        text = str(text or "")
-        for pattern, zone_name in _COUNTRY_TIMEZONE_HINTS:
-            if pattern.search(text):
-                return ZoneInfo(zone_name)
-    return None
+def _timezone_from_profile(work_location, nationality=None) -> Optional[ZoneInfo]:
+    """`nationality` is accepted only so older callers keep working; it is
+    ignored on purpose (see above)."""
+    return timezone_from_work_location(work_location)
 
 
-def _get_employee_timezone(employee_id: str) -> ZoneInfo:
-    """Timezone this employee's shift times are authored in (see above)."""
+def _get_employee_timezone(employee_id: str, latitude=None, longitude=None) -> ZoneInfo:
+    """Timezone this employee's shift times are authored in (see above).
+    Pass the check-in/out GPS fix when there is one -- it wins."""
+    zone = timezone_from_coordinates(latitude, longitude)
+    if zone:
+        return zone
+
     try:
         row = (
             supabase_admin.table("employees")
-            .select("work_location, nationality")
+            .select("work_location")
             .eq("id", employee_id)
             .maybe_single()
             .execute()
         )
         if row and row.data:
-            zone = _timezone_from_profile(
-                row.data.get("work_location"), row.data.get("nationality")
-            )
+            zone = timezone_from_work_location(row.data.get("work_location"))
             if zone:
                 return zone
     except Exception as e:
@@ -742,8 +746,13 @@ def check_in(auth_user_id: str, data, request: Optional[Request] = None):
         check_in_time = _now_utc()
         shift = _get_employee_shift(employee_id, today)
         rule = _get_attendance_rule()
-        company_tz = _get_employee_timezone(employee_id)
+        company_tz = _get_employee_timezone(employee_id, data.latitude, data.longitude)
         late_minutes = _late_minutes(check_in_time, today, shift, rule, tz=company_tz)
+
+        # Super Admins are not part of late/absent/present tracking.
+        is_super_admin = employee_id in get_super_admin_employee_ids()
+        if is_super_admin:
+            late_minutes = 0
 
         payload = {
             "employee_id": employee_id,
@@ -824,7 +833,9 @@ def check_in(auth_user_id: str, data, request: Optional[Request] = None):
                     f"on time today."
                 )
 
-            for recipient_id in get_employee_ids_for_role(ADMIN):
+            for recipient_id in (
+                [] if is_super_admin else get_employee_ids_for_role(ADMIN)
+            ):
                 if recipient_id == employee_id:
                     continue  # don't ping a Super Admin about their own check-in
                 notify_employee(
@@ -1118,6 +1129,11 @@ def get_attendance_reminder_status(auth_user_id: str):
                 message="No reminder due.", data={"reminder_due": False}
             )
 
+        if employee_id in get_super_admin_employee_ids():
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
         pref = (
             supabase_admin.table("notification_preferences")
             .select("attendance_reminders")
@@ -1285,6 +1301,11 @@ def get_checkout_reminder_status(auth_user_id: str):
     try:
         employee_id = get_employee_id_for_auth_user(auth_user_id)
         if not employee_id:
+            return success_response(
+                message="No reminder due.", data={"reminder_due": False}
+            )
+
+        if employee_id in get_super_admin_employee_ids():
             return success_response(
                 message="No reminder due.", data={"reminder_due": False}
             )
@@ -3835,6 +3856,8 @@ def get_org_attendance_report(
             roster_query = roster_query.eq("id", employee_id)
 
         roster = (roster_query.order("full_name").execute()).data or []
+        sa_ids = get_super_admin_employee_ids()  # Super Admins are excluded
+        roster = [emp for emp in roster if emp["id"] not in sa_ids]
         company_tz = _get_company_timezone()
 
         if not roster:
@@ -4025,16 +4048,19 @@ def get_all_attendance(
         start = (max(page, 1) - 1) * max(min(limit, 200), 1)
         end = start + max(min(limit, 200), 1) - 1
 
-        filters = {"attendance_date": target_date.isoformat()} if target_date else None
-
-        records, total = attendance_repo.list(
-            select=ATTENDANCE_SELECT,
-            filters=filters,
-            order_by="attendance_date",
-            ascending=False,
-            start=start,
-            end=end,
+        query = supabase_admin.table("attendance").select(
+            ATTENDANCE_SELECT, count="exact"
         )
+        if target_date:
+            query = query.eq("attendance_date", target_date.isoformat())
+
+        # Super Admins are not part of attendance tracking.
+        sa_ids = list(get_super_admin_employee_ids())
+        if sa_ids:
+            query = query.not_.in_("employee_id", sa_ids)
+
+        resp = query.order("attendance_date", desc=True).range(start, end).execute()
+        records, total = resp.data or [], (resp.count or 0)
 
         return success_response(
             message="Attendance fetched successfully.",
@@ -4098,13 +4124,16 @@ def get_attendance_analytics(from_date: date, to_date: date):
     try:
         response = (
             supabase_admin.table("attendance")
-            .select("status, late_minutes, overtime_minutes, working_minutes")
+            .select(
+                "employee_id, status, late_minutes, overtime_minutes, working_minutes"
+            )
             .gte("attendance_date", from_date.isoformat())
             .lte("attendance_date", to_date.isoformat())
             .execute()
         )
 
-        rows = response.data or []
+        sa_ids = get_super_admin_employee_ids()  # Super Admins are excluded
+        rows = [r for r in (response.data or []) if r.get("employee_id") not in sa_ids]
         total_records = len(rows)
         present_count = sum(1 for r in rows if r.get("status") == "Present")
         half_day_count = sum(1 for r in rows if r.get("status") == "Half Day")

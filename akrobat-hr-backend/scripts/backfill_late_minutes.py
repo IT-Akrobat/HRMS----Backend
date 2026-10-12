@@ -1,16 +1,13 @@
-"""One-time fix: recompute attendance.late_minutes with each employee's own
-timezone.
+"""One-time fix: recompute attendance.late_minutes using the timezone each
+check-in actually happened in.
 
-Why: before this change, lateness was judged against ONE company-wide
-timezone (settings.timezone). Staff in the other country were measured
-against the wrong clock, so e.g. Singapore employees were stored with
-late_minutes = 0 even when they checked in late, and never showed up in
-the dashboard's Late list. New check-ins are now correct; this script
-repairs the rows already saved.
-
-Only employees whose own timezone (work_location / nationality) differs
-from the company timezone are touched -- everyone else's stored value was
-already computed against the right clock.
+Why: lateness used to be judged against the company timezone, or against the
+employee's nationality. Staff working in the other country -- e.g. Indian
+nationals working in the Singapore office -- were measured against the wrong
+clock, stored with late_minutes = 0 even when they checked in late, and never
+showed up in the dashboard's Late list. New check-ins are now judged by the
+check-in GPS (then work_location, then the company timezone); this script
+repairs the rows already saved, using the same rule.
 
 Usage (from the backend root, with the same .env the API uses):
 
@@ -30,9 +27,9 @@ from app.attendance.services import (
     _get_company_timezone,
     _get_employee_shift,
     _late_minutes,
-    _timezone_from_profile,
     _today_in_company_tz,
 )
+from app.attendance.tz_helper import resolve_record_timezone
 
 PAGE = 1000
 
@@ -69,23 +66,19 @@ def main():
 
     employees = _fetch_all(
         lambda: supabase_admin.table("employees")
-        .select("id, full_name, work_location, nationality")
+        .select("id, full_name, work_location")
         .order("id")
     )
-    affected = {}
-    for emp in employees:
-        zone = _timezone_from_profile(emp.get("work_location"), emp.get("nationality"))
-        if zone and zone.key != company_tz.key:
-            affected[emp["id"]] = (emp.get("full_name"), zone)
-
+    people = {e["id"]: e for e in employees}
     print(f"Company timezone: {company_tz.key}")
-    print(f"Employees on a different timezone: {len(affected)}")
-    if not affected:
-        return
 
     rows = _fetch_all(
         lambda: supabase_admin.table("attendance")
-        .select("id, employee_id, attendance_date, check_in_time, late_minutes")
+        .select(
+            "id, employee_id, attendance_date, check_in_time, late_minutes, "
+            "check_in_latitude, check_in_longitude, "
+            "check_out_latitude, check_out_longitude"
+        )
         .gte("attendance_date", start.isoformat())
         .lte("attendance_date", end.isoformat())
         .not_.is_("check_in_time", "null")
@@ -95,12 +88,13 @@ def main():
     changed = 0
     per_employee = defaultdict(int)
     for row in rows:
-        emp_id = row["employee_id"]
-        if emp_id not in affected:
+        emp = people.get(row["employee_id"])
+        if not emp:
             continue
-        name, zone = affected[emp_id]
+        name = emp.get("full_name")
+        zone = resolve_record_timezone(row, emp.get("work_location"), company_tz)
         for_date = date.fromisoformat(row["attendance_date"])
-        shift = _get_employee_shift(emp_id, for_date)
+        shift = _get_employee_shift(row["employee_id"], for_date)
         new_late = _late_minutes(
             _naive_utc(row["check_in_time"]), for_date, shift, rule, tz=zone
         )
@@ -109,7 +103,10 @@ def main():
             continue
         changed += 1
         per_employee[name] += 1
-        print(f"{row['attendance_date']}  {name}: {old_late} -> {new_late} min")
+        print(
+            f"{row['attendance_date']}  {name} [{zone.key}]: "
+            f"{old_late} -> {new_late} min"
+        )
         if args.apply:
             supabase_admin.table("attendance").update({"late_minutes": new_late}).eq(
                 "id", row["id"]

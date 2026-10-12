@@ -189,9 +189,9 @@ def all_leave_balances(
 
 # ==========================================
 # APPROVE / REJECT LEAVE
-# The employee's assigned leave manager (or Super Admin) decides. The
-# leave-manager check lives in update_leave_status(), because it depends
-# on WHICH employee the request belongs to, not just on the caller's role.
+# The employee's REPORTING MANAGER decides (any role). Super Admin only
+# views. The check lives in update_leave_status(), because it depends on
+# WHICH employee the request belongs to, not on the caller's role.
 # ==========================================
 
 

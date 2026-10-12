@@ -4,7 +4,10 @@ from fastapi import HTTPException
 
 from app.core.database import supabase_admin
 from app.core.responses import success_response
-from app.core.helpers.employee_helper import is_operation_every_saturday_name
+from app.core.helpers.employee_helper import (
+    is_operation_every_saturday_name,
+    get_super_admin_employee_ids,
+)
 
 
 def _tenure(joining_date):
@@ -229,7 +232,8 @@ def attendance_report():
         from app.attendance.tz_helper import resolve_record_timezone
 
         company_tz = _get_company_timezone()
-        rows = response.data or []
+        sa_ids = get_super_admin_employee_ids()  # Super Admins are excluded
+        rows = [r for r in (response.data or []) if r.get("employee_id") not in sa_ids]
         for row in rows:
             emp = row.get("employees") or {}
             row["ot_eligible"] = bool(emp.get("ot_eligible"))
@@ -276,8 +280,12 @@ def today_attendance():
             )
             """).eq("attendance_date", today).execute()
 
+        sa_ids = get_super_admin_employee_ids()  # Super Admins are excluded
         return success_response(
-            message="Today's attendance fetched successfully", data=response.data
+            message="Today's attendance fetched successfully",
+            data=[
+                r for r in (response.data or []) if r.get("employee_id") not in sa_ids
+            ],
         )
 
     except Exception as e:
@@ -378,9 +386,26 @@ def dashboard_report():
 
     try:
 
-        employees = len(supabase_admin.table("employees").select("id").execute().data)
+        sa_ids = get_super_admin_employee_ids()  # Super Admins are excluded
 
-        attendance = len(supabase_admin.table("attendance").select("id").execute().data)
+        employees = len(
+            [
+                e
+                for e in supabase_admin.table("employees").select("id").execute().data
+                if e["id"] not in sa_ids
+            ]
+        )
+
+        attendance = len(
+            [
+                a
+                for a in supabase_admin.table("attendance")
+                .select("id, employee_id")
+                .execute()
+                .data
+                if a.get("employee_id") not in sa_ids
+            ]
+        )
 
         leaves = len(supabase_admin.table("leave_requests").select("id").execute().data)
 
@@ -903,6 +928,9 @@ def all_employees_monthly_attendance_report(month: str):
             )
             .order("full_name")
         )
+
+        sa_ids = get_super_admin_employee_ids()  # Super Admins are excluded
+        employees = [e for e in employees if e["id"] not in sa_ids]
 
         attendance = _fetch_all(
             lambda: supabase_admin.table("attendance")
