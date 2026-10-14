@@ -515,7 +515,7 @@ def evaluate_self_apply_access(
     """
     Can this employee apply for this leave type themselves?
 
-    - Hospitalisation / Maternity (leave_types.hr_managed): never -- HR and
+    - Hospitalisation (leave_types.hr_managed): never -- HR and
       Super Admin record these.
     - MC_ONLY (not on the Singapore sheet): MC (Sick Leave) only.
     - SG_LIST: Annual, MC, Replacement, Childcare only (the sheet is the
@@ -542,6 +542,18 @@ def evaluate_self_apply_access(
     if scheme == SCHEME_FOREIGN_WORKER:
         if leave_name in FOREIGN_WORKER_LEAVE_TYPES:
             return True, None
+        return False, f"{leave_name.title()} is not available for you."
+
+    # Maternity / Paternity: the employee sees and can apply for them only
+    # after Super Admin has set a number of days for them (user form ->
+    # Leave days), and only if they pass the gender / marital rules.
+    if leave_name in ("MATERNITY LEAVE", "PATERNITY LEAVE"):
+        granted = leave_override_repo.find_one(
+            {"employee_id": employee.get("id"), "leave_type_id": leave_type["id"]},
+            select="days",
+        )
+        if granted and (granted.get("days") or 0) > 0:
+            return evaluate_leave_eligibility(employee, leave_type["id"])
         return False, f"{leave_name.title()} is not available for you."
 
     if scheme == SCHEME_SG_LIST:

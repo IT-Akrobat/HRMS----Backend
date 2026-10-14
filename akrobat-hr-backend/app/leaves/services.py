@@ -25,6 +25,7 @@ from app.leaves.working_days import calculate_leave_days
 from app.leaves.policy_services import (
     SICK_LEAVE,
     evaluate_self_apply_access,
+    evaluate_leave_eligibility,
     validate_leave_request_against_entitlement,
     deduct_entitlement,
     release_entitlement,
@@ -663,7 +664,7 @@ def update_leave_status(
 
 
 # ==========================================
-# HR / SUPER ADMIN: RECORD HOSPITALISATION / MATERNITY LEAVE
+# HR / SUPER ADMIN: RECORD HOSPITALISATION LEAVE (Maternity / Paternity: Super Admin only)
 # (employees cannot apply for or see these -- leave_types.hr_managed)
 # ==========================================
 
@@ -671,16 +672,30 @@ def update_leave_status(
 def record_hr_managed_leave(auth_user_id: str, data, request: Optional[Request] = None):
     try:
         leave_type = _resolve_leave_type(data.leave_type)
-        if not leave_type.get("hr_managed"):
+        leave_name = (leave_type.get("leave_name") or "").strip().upper()
+        super_admin_only = leave_name in ("MATERNITY LEAVE", "PATERNITY LEAVE")
+        if not leave_type.get("hr_managed") and not super_admin_only:
             bad_request(
                 f"{data.leave_type} is not an HR-managed leave type. "
                 "Employees apply for it themselves."
             )
+        # Maternity / Paternity can be recorded by Super Admin only.
+        if super_admin_only and (
+            (get_role_name_for_auth_user(auth_user_id) or "").strip().upper() != ADMIN
+        ):
+            forbidden(f"{leave_name.title()} can be recorded by Super Admin only.")
         if data.to_date < data.from_date:
             bad_request("to_date must be on or after from_date.")
 
         employee_id = str(data.employee_id)
         employee = employee_repo.get_by_id_or_404(employee_id, "Employee not found.")
+        if super_admin_only:
+            eligible, reason = evaluate_leave_eligibility(employee, leave_type["id"])
+            if not eligible:
+                bad_request(
+                    reason
+                    or f"{leave_name.title()} is not applicable for this employee."
+                )
         total_days = calculate_leave_days(employee, data.from_date, data.to_date)[
             "total_days"
         ]

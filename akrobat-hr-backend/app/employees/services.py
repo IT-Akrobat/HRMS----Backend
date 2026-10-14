@@ -333,6 +333,7 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
                 assigned_by=get_employee_id_for_auth_user(
                     getattr(current_user, "id", None)
                 ),
+                auth_user_id=getattr(current_user, "id", None),
             )
 
         supabase_admin.table("user_profiles").insert(
@@ -477,7 +478,9 @@ def update_employee(
         # saved) and applied after the employee row is updated below.
         leave_entitlements = update_data.pop("leave_entitlements", None)
         validated_entitlements = (
-            validate_leave_entitlements(employee_id, leave_entitlements)
+            validate_leave_entitlements(
+                employee_id, leave_entitlements, getattr(current_user, "id", None)
+            )
             if leave_entitlements
             else None
         )

@@ -1,4 +1,4 @@
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi import HTTPException
 
@@ -35,6 +35,55 @@ def _resolve_employee_id(auth_user_id: str) -> str:
     return employee_id
 
 
+# ---------------------------------------------------------------------------
+# AUTO-DELETE (RETENTION)
+# ---------------------------------------------------------------------------
+# Each employee can choose how long their notifications are kept: one week
+# (7), two weeks (14) or one month (30). The choice is stored per employee in
+# notification_preferences.notification_retention_days (sql/034.sql) and only
+# ever deletes THAT employee's rows. There is no background scheduler in this
+# backend, so expired rows are purged (a) immediately when the choice is
+# saved and (b) every time the employee loads their notification list.
+
+RETENTION_OPTIONS = (7, 14, 30)
+
+
+def _get_retention_days(employee_id: str) -> int | None:
+    try:
+        response = (
+            supabase_admin.table("notification_preferences")
+            .select("notification_retention_days")
+            .eq("employee_id", employee_id)
+            .maybe_single()
+            .execute()
+        )
+        if response and response.data:
+            value = response.data.get("notification_retention_days")
+            return int(value) if value else None
+        return None
+    except Exception as e:
+        # Most likely sql/034.sql hasn't been run yet -- behave as "no
+        # auto-delete" instead of breaking the notifications list.
+        logger.error(f"Unable to read notification retention for {employee_id}: {e}")
+        return None
+
+
+def _purge_expired(employee_id: str, days: int | None) -> None:
+    if not days:
+        return
+    try:
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
+        (
+            supabase_admin.table("notifications")
+            .delete()
+            .eq("user_id", employee_id)
+            .lt("created_at", cutoff.isoformat())
+            .execute()
+        )
+    except Exception as e:
+        logger.error(f"Unable to purge old notifications for {employee_id}: {e}")
+
+
 # =========================
 # LIST MY NOTIFICATIONS
 # =========================
@@ -43,6 +92,9 @@ def _resolve_employee_id(auth_user_id: str) -> str:
 def get_my_notifications(auth_user_id: str):
     try:
         employee_id = _resolve_employee_id(auth_user_id)
+
+        # Auto-delete anything older than this employee's chosen retention.
+        _purge_expired(employee_id, _get_retention_days(employee_id))
 
         response = (
             supabase_admin.table("notifications")
@@ -63,6 +115,57 @@ def get_my_notifications(auth_user_id: str):
     except Exception as e:
         logger.exception(e)
         internal_server_error("Unable to fetch notifications.")
+
+
+# =========================
+# AUTO-DELETE SETTING (GET / SET)
+# =========================
+
+
+def get_notification_retention(auth_user_id: str):
+    try:
+        employee_id = _resolve_employee_id(auth_user_id)
+
+        return success_response(
+            message="Notification retention fetched successfully.",
+            data={"days": _get_retention_days(employee_id)},
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception(e)
+        internal_server_error("Unable to fetch notification retention.")
+
+
+def set_notification_retention(auth_user_id: str, days: int):
+    try:
+        employee_id = _resolve_employee_id(auth_user_id)
+
+        if days not in RETENTION_OPTIONS:
+            bad_request("Choose one week (7), two weeks (14) or one month (30).")
+
+        supabase_admin.table("notification_preferences").upsert(
+            {"employee_id": employee_id, "notification_retention_days": days},
+            on_conflict="employee_id",
+        ).execute()
+
+        # Apply right away -- delete this user's notifications older than
+        # the chosen period.
+        _purge_expired(employee_id, days)
+
+        return success_response(
+            message="Notification retention updated successfully.",
+            data={"days": days},
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception(e)
+        internal_server_error("Unable to update notification retention.")
 
 
 # =========================

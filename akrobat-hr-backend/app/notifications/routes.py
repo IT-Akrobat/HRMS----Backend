@@ -1,6 +1,9 @@
 from fastapi import APIRouter, Depends
 
+from app.notifications.schemas import UpdateNotificationRetentionRequest
 from app.notifications.services import (
+    get_notification_retention,
+    set_notification_retention,
     get_my_notifications,
     mark_notification_read,
     mark_all_notifications_read,
@@ -22,6 +25,28 @@ router = APIRouter(prefix="/notifications", tags=["Notifications"])
 def my_notifications(user=Depends(get_current_user)):
 
     return get_my_notifications(user.id)
+
+
+# =========================
+# AUTO-DELETE (RETENTION) SETTING
+# =========================
+# GET returns the current choice for this user (7 / 14 / 30 days, or null
+# if they never picked one). PUT saves the choice for this user only and
+# immediately deletes this user's notifications older than that.
+
+
+@router.get("/retention")
+def notification_retention(user=Depends(get_current_user)):
+
+    return get_notification_retention(user.id)
+
+
+@router.put("/retention")
+def update_notification_retention(
+    data: UpdateNotificationRetentionRequest, user=Depends(get_current_user)
+):
+
+    return set_notification_retention(user.id, data.days)
 
 
 # =========================

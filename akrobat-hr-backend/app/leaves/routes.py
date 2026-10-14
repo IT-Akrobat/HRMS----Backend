@@ -225,7 +225,7 @@ def entitlement_types(user=Depends(require_permission("VIEW_LEAVE_REQUESTS"))):
     """Leave types that get a "days" input on the Create / Edit User form,
     with the gender / marital-status exclusions the form uses to hide
     e.g. Maternity for a male employee."""
-    return get_entitlement_form_types()
+    return get_entitlement_form_types(user.id)
 
 
 @router.get("/policy/employee-entitlements/{employee_id}")

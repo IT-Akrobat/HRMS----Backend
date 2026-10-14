@@ -96,3 +96,30 @@ alter table leave_requests add constraint leave_requests_mc_status_check
     check (mc_status is null or mc_status in ('AWAITING_CERTIFICATE', 'CERTIFICATE_UPLOADED', 'VALIDATED'));
 create index if not exists idx_leave_requests_mc_pending
     on leave_requests(applied_date) where mc_status is not null and mc_status <> 'VALIDATED';
+
+
+
+    -- =====================================================================
+-- NOTIFICATIONS -- per-user auto-delete (retention) setting
+-- =====================================================================
+-- Each employee picks, on the Notifications page, how long their
+-- notifications are kept: 7 (one week), 14 (two weeks) or 30 (one month)
+-- days. NULL = never chose one, nothing is auto-deleted.
+-- Read/applied by app/notifications/services.py (only that employee's
+-- rows are ever deleted).
+-- =====================================================================
+
+alter table notification_preferences
+    add column if not exists notification_retention_days integer;
+
+alter table notification_preferences
+    drop constraint if exists notification_preferences_retention_days_check;
+
+alter table notification_preferences
+    add constraint notification_preferences_retention_days_check
+    check (notification_retention_days is null or notification_retention_days in (7, 14, 30));
+    -- Maternity Leave is no longer HR-managed: Super Admin sets the days on the
+-- user form and the employee then sees it and applies for it themselves
+-- (same as Paternity Leave). Hospitalisation stays HR-managed.
+update leave_types set hr_managed = false
+where leave_name = 'MATERNITY LEAVE';

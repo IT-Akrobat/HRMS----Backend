@@ -41,3 +41,9 @@ class NotificationResponse(BaseModel):
     is_read: bool
 
     created_at: datetime
+
+
+class UpdateNotificationRetentionRequest(BaseModel):
+
+    # 7 = one week, 14 = two weeks, 30 = one month
+    days: int

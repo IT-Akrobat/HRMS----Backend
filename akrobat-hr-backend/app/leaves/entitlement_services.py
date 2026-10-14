@@ -25,7 +25,9 @@ from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 from app.core.audit import record_audit_log
-from app.core.exceptions import bad_request, internal_server_error
+from app.core.constants import ADMIN
+from app.core.exceptions import bad_request, forbidden, internal_server_error
+from app.core.permissions import get_role_name_for_auth_user
 from app.core.logger import logger
 from app.core.repository import SupabaseRepository
 from app.core.responses import success_response
@@ -49,6 +51,17 @@ from app.leaves.policy_services import (
 )
 
 MAX_DAYS = 365
+
+# Maternity / Paternity entitlements are handled by Super Admin only --
+# HR can neither see nor set them.
+SUPER_ADMIN_ONLY_LEAVES = {"MATERNITY LEAVE", "PATERNITY LEAVE"}
+
+
+def _is_super_admin(auth_user_id: Optional[str]) -> bool:
+    if not auth_user_id:
+        return False
+    return (get_role_name_for_auth_user(auth_user_id) or "").strip().upper() == ADMIN
+
 
 # Order + friendly labels for the compact form. Anything not listed here
 # (i.e. HR-added types) comes after, alphabetically.
@@ -95,7 +108,7 @@ def _item(entry: Any) -> tuple[str, Any]:
 # ==========================================
 
 
-def get_entitlement_form_types():
+def get_entitlement_form_types(auth_user_id: Optional[str] = None):
     try:
         leave_types, _ = leave_type_repo.list(
             select="id, leave_name, description, default_days, entitlement_mode, "
@@ -136,9 +149,12 @@ def get_entitlement_form_types():
                 return (0, FORM_ORDER.index(name), "")
             return (1, 0, name)
 
+        super_admin = _is_super_admin(auth_user_id)
         data = []
         for lt in sorted(leave_types, key=sort_key):
             name = (lt.get("leave_name") or "").strip().upper()
+            if name in SUPER_ADMIN_ONLY_LEAVES and not super_admin:
+                continue
             data.append(
                 {
                     "id": lt["id"],
@@ -221,7 +237,9 @@ def get_employee_entitlement_days(employee_id: str):
 # ==========================================
 
 
-def validate_leave_entitlements(employee_id: Optional[str], entries: list) -> list:
+def validate_leave_entitlements(
+    employee_id: Optional[str], entries: list, auth_user_id: Optional[str] = None
+) -> list:
     """
     Raises 400 on bad input. Returns normalised [(leave_type, days)].
     Called BEFORE the employee row is touched on edit, so a rejected
@@ -243,6 +261,8 @@ def validate_leave_entitlements(employee_id: Optional[str], entries: list) -> li
             bad_request("Unknown leave type.")
 
         name = (leave_type.get("leave_name") or "").strip().upper()
+        if name in SUPER_ADMIN_ONLY_LEAVES and not _is_super_admin(auth_user_id):
+            forbidden(f"{_label(name)} can be set by Super Admin only.")
         days = _clean_days(raw_days, name)
         mode = leave_type.get("entitlement_mode")
 
@@ -269,6 +289,7 @@ def apply_leave_entitlements(
     entries: list,
     assigned_by: Optional[str] = None,
     normalised: Optional[list] = None,
+    auth_user_id: Optional[str] = None,
 ):
     """
     Writes the entered days for one employee. `employee` is the saved
@@ -279,7 +300,7 @@ def apply_leave_entitlements(
     normalised = (
         normalised
         if normalised is not None
-        else validate_leave_entitlements(employee_id, entries)
+        else validate_leave_entitlements(employee_id, entries, auth_user_id)
     )
     year = datetime.now(timezone.utc).year
     applied, skipped = [], []
