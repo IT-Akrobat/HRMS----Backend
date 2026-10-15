@@ -3303,6 +3303,28 @@ def get_my_attendance(
             today = _today_in_company_tz()
             last_synth_day = min(to_date, today)
 
+            # Public holidays in the range. A weekday with no attendance row
+            # that is a holiday is a "Holiday", NOT an "Absent" day (same
+            # rule the Reports module uses: Off > Holiday > Leave > Absent;
+            # every holiday row applies to everyone).
+            holiday_names = {}
+            try:
+                hol_resp = (
+                    supabase_admin.table("holidays")
+                    .select("holiday_name, holiday_date")
+                    .gte("holiday_date", from_date.isoformat())
+                    .lte("holiday_date", last_synth_day.isoformat())
+                    .execute()
+                )
+                for h in hol_resp.data or []:
+                    hd = str(h.get("holiday_date") or "")[:10]
+                    if hd:
+                        holiday_names.setdefault(
+                            hd, (h.get("holiday_name") or "").strip()
+                        )
+            except Exception as e:  # never break the calendar over this
+                logger.warning(f"Could not load holidays for attendance: {e}")
+
             for d in _daterange(from_date, last_synth_day):
                 key = d.isoformat()
                 if key in rows_by_date:
@@ -3311,6 +3333,12 @@ def get_my_attendance(
                     # get_team_attendance_report() re: "working day" being
                     # simplified to Mon-Fri company-wide for now.
                     rows_by_date[key] = {"date": key, "status": "Weekly Off"}
+                elif key in holiday_names:
+                    rows_by_date[key] = {
+                        "date": key,
+                        "status": "Holiday",
+                        "holiday_name": holiday_names[key],
+                    }
                 elif d in leave_dates:
                     rows_by_date[key] = {"date": key, "status": "On Leave"}
                 else:
@@ -3742,6 +3770,7 @@ def get_team_attendance_report(auth_user_id: str, from_date: date, to_date: date
                 "half_days": 0,
                 "leave_days": 0,
                 "absent_days": 0,
+                "early_checkout_days": 0,
                 "late_days": 0,
                 "total_working_minutes": 0,
                 "total_overtime_minutes": 0,
@@ -3769,11 +3798,11 @@ def get_team_attendance_report(auth_user_id: str, from_date: date, to_date: date
                     if record.get("status") == "Half Day":
                         summary["half_days"] += 1
                     elif record.get("status") == "Early Checkout":
-                        # Checked in but left before the half-day mark —
-                        # counts toward absent_days rather than
-                        # present_days, since they didn't put in enough
-                        # time to count as attended.
-                        summary["absent_days"] += 1
+                        # Checked in but left before the half-day mark.
+                        # Shown as its own "Early Checkout" count — they
+                        # did come in, so this is NOT an absent day. (Still
+                        # not counted as present/attended either.)
+                        summary["early_checkout_days"] += 1
                     else:
                         summary["present_days"] += 1
                     if (record.get("late_minutes") or 0) > 0:
@@ -3939,6 +3968,7 @@ def get_org_attendance_report(
                 "half_days": 0,
                 "leave_days": 0,
                 "absent_days": 0,
+                "early_checkout_days": 0,
                 "late_days": 0,
                 "total_working_minutes": 0,
                 "total_overtime_minutes": 0,
@@ -3955,7 +3985,7 @@ def get_org_attendance_report(
                         summary["half_days"] += 1
                     elif record.get("status") == "Early Checkout":
                         day_status = "Early Checkout"
-                        summary["absent_days"] += 1
+                        summary["early_checkout_days"] += 1
                     else:
                         day_status = "Present"
                         summary["present_days"] += 1
