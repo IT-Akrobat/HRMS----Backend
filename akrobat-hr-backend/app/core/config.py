@@ -53,6 +53,11 @@ ALLOWED_ORIGINS = [
     if origin.strip()
 ]
 
+# Public URL of the frontend. Used to build the redirect_to of the Supabase
+# "Forgot password" email (-> {FRONTEND_URL}/reset-password). Must also be
+# listed under Supabase > Authentication > URL Configuration > Redirect URLs.
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+
 # ---------------------------------------------------------------------
 # Auth cookies (see app/core/cookies.py, app/core/csrf.py)
 # ---------------------------------------------------------------------

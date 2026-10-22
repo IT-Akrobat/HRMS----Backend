@@ -2,11 +2,18 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from app.auth.schemas import (
     ChangePasswordRequest,
+    ForgotPasswordRequest,
     LoginRequest,
     MeEnvelope,
     RefreshRequest,
 )
-from app.auth.services import change_password, get_me, login_user, refresh_user_session
+from app.auth.services import (
+    change_password,
+    get_me,
+    login_user,
+    refresh_user_session,
+    reset_password_with_employee_code,
+)
 from app.core.config import ACCESS_TOKEN_COOKIE, REFRESH_TOKEN_COOKIE
 from app.core.cookies import clear_auth_cookies, issue_csrf_cookie, set_auth_cookies
 from app.core.responses import success_response
@@ -182,6 +189,29 @@ def change_password_route(
     )
 
     return success_response(message=result["message"])
+
+
+@router.post("/forgot-password")
+@limiter.limit("3/minute")
+def forgot_password(data: ForgotPasswordRequest, request: Request, response: Response):
+    """
+    Public. Username + employee code -> new temporary password, returned
+    once in the response body. The user must change it after signing in
+    (login reports password_expired=true). See
+    app/auth/services.reset_password_with_employee_code.
+    """
+
+    result = reset_password_with_employee_code(
+        data.username, data.employee_code, request=request
+    )
+
+    # The body contains a credential -- make sure nothing caches it.
+    response.headers["Cache-Control"] = "no-store"
+
+    return success_response(
+        message=result["message"],
+        data={"temp_password": result["temp_password"]},
+    )
 
 
 @router.get("/ws-ticket")

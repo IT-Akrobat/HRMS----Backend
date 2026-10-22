@@ -1,3 +1,6 @@
+import hmac
+from datetime import datetime, timezone
+
 from fastapi import HTTPException, Request
 
 from app.access_control.services import (
@@ -5,6 +8,7 @@ from app.access_control.services import (
     get_access_control_settings,
     get_lockout_status,
     get_password_changed_at,
+    invalidate_sessions,
     is_ip_allowed,
     is_locked,
     is_password_expired,
@@ -20,6 +24,7 @@ from app.core.exceptions import bad_request, forbidden, unauthorized
 from app.core.database import supabase
 from app.core.helpers.employee_helper import (
     find_employees_by_username,
+    generate_temp_password,
     is_placeholder_email,
     placeholder_login_email,
 )
@@ -33,6 +38,33 @@ def _client_ip(request: Request | None) -> str | None:
     # so existing call sites in this file don't all need touching --
     # see app/core/request_ip.py for the actual logic and why it exists.
     return get_client_ip(request)
+
+
+# ==========================================
+# FORCED PASSWORD CHANGE MARKER
+# ==========================================
+#
+# After a "forgot password" reset the user is holding a temporary password
+# that was shown on screen, so it must be replaced on first login. Rather
+# than add a column, user_profiles.password_changed_at is set to the Unix
+# epoch as a marker. login_user() reports password_expired=True for it (the
+# frontend then sends the user to Settings > Security), and
+# change_password() -> touch_password_changed_at() overwrites it with the
+# real time, which clears the flag.
+
+_FORCE_CHANGE_MARKER = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _is_force_change_marker(password_changed_at) -> bool:
+    return bool(password_changed_at) and password_changed_at <= datetime(
+        2000, 1, 1, tzinfo=timezone.utc
+    )
+
+
+def _mark_password_must_change(auth_user_id: str):
+    supabase_admin.table("user_profiles").update(
+        {"password_changed_at": _FORCE_CHANGE_MARKER.isoformat()}
+    ).eq("auth_user_id", auth_user_id).execute()
 
 
 def login_user(username: str, password: str, request: Request = None):
@@ -143,7 +175,7 @@ def login_user(username: str, password: str, request: Request = None):
         password_changed_at = get_password_changed_at(employee_id)
         password_expired = is_password_expired(
             password_changed_at, access_control.get("password_expiry_days")
-        )
+        ) or _is_force_change_marker(password_changed_at)
     except Exception as e:
         print("LOGIN POST-PROCESSING WARNING (password expiry):", e)
         password_expired = False
@@ -284,6 +316,123 @@ def change_password(
     )
 
     return {"message": "Password updated successfully."}
+
+
+# ==========================================
+# POST /auth/forgot-password
+# ==========================================
+#
+# Self-service reset for employees who have no real email on file (so no
+# reset link can be mailed). The caller proves who they are with their
+# username + employee code; if both match, a new temporary password is
+# generated, set on the Supabase Auth user, and returned ONCE in the
+# response. The user logs in with it and is forced to pick their own
+# password (see _FORCE_CHANGE_MARKER above).
+#
+# Abuse limits: 3 requests/minute per IP (route), and a wrong employee
+# code for an existing username counts toward the same per-account
+# lockout as wrong login passwords -- so the code can't be brute-forced.
+# A locked account can't be reset until the lock expires.
+
+_RESET_MISMATCH = "Username and employee code do not match."
+
+
+def _norm_code(value: str | None) -> str:
+    return "".join((value or "").split()).casefold()
+
+
+def reset_password_with_employee_code(
+    username: str, employee_code: str, request: Request = None
+):
+    matches = find_employees_by_username(username)
+
+    # Unknown / ambiguous username gets the same message as a wrong code.
+    if len(matches) != 1:
+        raise HTTPException(status_code=400, detail=_RESET_MISMATCH)
+
+    employee = matches[0]
+    employee_pk = employee["id"]
+
+    access_control = get_access_control_settings()
+
+    if is_locked(get_lockout_status(employee_pk)):
+        raise HTTPException(
+            status_code=423,
+            detail="Too many failed attempts. This account is temporarily locked -- try again later.",
+        )
+
+    expected = _norm_code(employee.get("employee_id"))
+    given = _norm_code(employee_code)
+
+    if not expected or not hmac.compare_digest(expected.encode(), given.encode()):
+        register_failed_attempt(
+            employee_pk,
+            access_control.get("lockout_attempts", 5),
+            access_control.get("lockout_duration_minutes", 15),
+        )
+        raise HTTPException(status_code=400, detail=_RESET_MISMATCH)
+
+    profile = (
+        supabase_admin.table("user_profiles")
+        .select("auth_user_id, is_active")
+        .eq("employee_id", employee_pk)
+        .maybe_single()
+        .execute()
+    )
+
+    if not profile or not profile.data or not profile.data.get("auth_user_id"):
+        raise HTTPException(
+            status_code=400,
+            detail="This account can't be reset online. Please contact HR.",
+        )
+
+    if profile.data.get("is_active") is False:
+        raise HTTPException(
+            status_code=403,
+            detail="This account is inactive. Please contact HR.",
+        )
+
+    auth_user_id = profile.data["auth_user_id"]
+    temp_password = generate_temp_password()
+
+    try:
+        supabase_admin.auth.admin.update_user_by_id(
+            auth_user_id, {"password": temp_password}
+        )
+    except Exception as e:
+        logger.warning(f"Forgot-password update failed: {e}")
+        raise HTTPException(status_code=500, detail="Could not reset password.")
+
+    # Best-effort follow-ups -- none may undo a reset that already worked.
+    try:
+        _mark_password_must_change(auth_user_id)
+    except Exception as e:
+        print("FORGOT PASSWORD WARNING (must-change marker):", e)
+
+    try:
+        reset_lockout(employee_pk)
+    except Exception as e:
+        print("FORGOT PASSWORD WARNING (lockout reset):", e)
+
+    try:
+        # End sessions opened with the old password. The user's next real
+        # login (with the temp password) lifts this block automatically.
+        invalidate_sessions([auth_user_id])
+    except Exception as e:
+        print("FORGOT PASSWORD WARNING (invalidate sessions):", e)
+
+    record_audit_log(
+        module="AUTH",
+        action="UPDATE",
+        performed_by=auth_user_id,
+        description=f"Password reset via forgot-password: {employee['full_name']}",
+        request=request,
+    )
+
+    return {
+        "message": "Your password has been reset. Sign in with the temporary password below, then set your own.",
+        "temp_password": temp_password,
+    }
 
 
 # ==========================================

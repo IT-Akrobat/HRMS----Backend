@@ -50,6 +50,9 @@ UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 EXEMPT_PATHS = {
     "/auth/login",
     "/auth/refresh",
+    # Pre-login "forgot password" (username + employee code -> temporary
+    # password). No session / CSRF cookie exists yet at that point.
+    "/auth/forgot-password",
 }
 
 

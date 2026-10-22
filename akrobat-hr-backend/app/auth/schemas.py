@@ -36,6 +36,13 @@ class ChangePasswordRequest(BaseModel):
     new_password: str = Field(min_length=8)
 
 
+class ForgotPasswordRequest(BaseModel):
+    # Same "username" the login form uses (see LoginRequest), plus the
+    # employee code (e.g. AKR-HR-EXE-0001) as a second factor of identity.
+    username: str = Field(..., min_length=1, max_length=100)
+    employee_code: str = Field(..., min_length=1, max_length=50)
+
+
 class SidebarItem(BaseModel):
     key: str
     label: str
