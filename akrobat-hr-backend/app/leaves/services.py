@@ -59,6 +59,32 @@ def _resolve_leave_type(leave_type_name: str) -> dict:
     return leave_type
 
 
+def mask_mc_days(records, show_days: bool, show_end_date: Optional[bool] = None):
+    """
+    MC days are NOT known when the employee applies -- they are worked out
+    from the end date on the medical certificate (see mc_services.py).
+
+      * AWAITING_CERTIFICATE     -> nobody sees a day count (none exists yet)
+      * CERTIFICATE_UPLOADED     -> only HR / Super Admin see days + certificate
+                                    end date (show_days=True)
+      * VALIDATED                -> everybody sees the final days
+    `show_end_date` (default: same as show_days) lets the employee still see the
+    certificate end date they typed in themselves -- only the day count is held back.
+    Mutates and returns `records` (a list of leave_requests rows).
+    """
+    if show_end_date is None:
+        show_end_date = show_days
+    for r in records or []:
+        status = r.get("mc_status")
+        if not status or status == "VALIDATED":
+            continue
+        if status == "AWAITING_CERTIFICATE" or not show_days:
+            r["total_days"] = None
+        if not show_end_date:
+            r["mc_end_date"] = None
+    return records
+
+
 def get_hr_employee_ids() -> list:
     ids = set()
     for role in HR_ROLE_NAMES:
@@ -135,6 +161,7 @@ def apply_leave(auth_user_id: str, data, request: Optional[Request] = None):
 
         leave_type = _resolve_leave_type(data.leave_type)
         leave_type_id = leave_type["id"]
+        is_mc = leave_type["leave_name"].strip().upper() == SICK_LEAVE
 
         applicant_record = employee_repo.get_by_id_or_404(
             employee_id, "Employee not found."
@@ -143,12 +170,21 @@ def apply_leave(auth_user_id: str, data, request: Optional[Request] = None):
         # Working days only: Sundays and public holidays are skipped, and
         # Saturdays count 0 / 0.5 / 1 according to the employee's own
         # Saturday schedule (see app/leaves/working_days.py).
-        total_days = calculate_leave_days(
-            applicant_record,
-            data.from_date,
-            data.to_date,
-            half_day=bool(getattr(data, "half_day", False)),
-        )["total_days"]
+        #
+        # MC is the exception: the real end date is only known from the
+        # medical certificate, which the employee uploads AFTER the leave.
+        # So no days are counted (or held) now -- they are calculated when
+        # the certificate end date is submitted, and the balance is taken
+        # when HR validates (see app/leaves/mc_services.py).
+        if is_mc:
+            total_days = 0
+        else:
+            total_days = calculate_leave_days(
+                applicant_record,
+                data.from_date,
+                data.to_date,
+                half_day=bool(getattr(data, "half_day", False)),
+            )["total_days"]
 
         # Eligibility (nationality/marital_status/gender/office-vs-field
         # exclusions from leave_eligibility_rules) — e.g. foreigners
@@ -171,8 +207,6 @@ def apply_leave(auth_user_id: str, data, request: Optional[Request] = None):
             applicant_record, leave_type, total_days
         )
 
-        is_mc = leave_type["leave_name"].strip().upper() == SICK_LEAVE
-
         leave_data = leave_repo.create(
             {
                 "employee_id": employee_id,
@@ -190,15 +224,19 @@ def apply_leave(auth_user_id: str, data, request: Optional[Request] = None):
 
         # Balance updates as soon as the employee applies: the days are
         # held now, confirmed on approval, handed back on rejection.
-        hold = deduct_entitlement(employee_id, leave_type, total_days, leave_data["id"])
-        if hold["balance_deducted"]:
-            leave_data = leave_repo.update(
-                leave_data["id"],
-                {
-                    "balance_deducted": True,
-                    "replacement_allocation": hold["replacement_allocation"],
-                },
+        # (MC holds nothing now -- its days don't exist yet.)
+        if not is_mc:
+            hold = deduct_entitlement(
+                employee_id, leave_type, total_days, leave_data["id"]
             )
+            if hold["balance_deducted"]:
+                leave_data = leave_repo.update(
+                    leave_data["id"],
+                    {
+                        "balance_deducted": True,
+                        "replacement_allocation": hold["replacement_allocation"],
+                    },
+                )
 
         record_audit_log(
             module="LEAVE",
@@ -207,7 +245,10 @@ def apply_leave(auth_user_id: str, data, request: Optional[Request] = None):
             target_employee_id=employee_id,
             record_id=leave_data.get("id"),
             description=(
-                f"Leave applied: {data.leave_type} "
+                f"MC applied ({data.from_date} to {data.to_date}); "
+                "days will be calculated from the certificate end date"
+                if is_mc
+                else f"Leave applied: {data.leave_type} "
                 f"({data.from_date} to {data.to_date}, {total_days} day(s))"
             ),
             new_values=leave_data,
@@ -224,7 +265,11 @@ def apply_leave(auth_user_id: str, data, request: Optional[Request] = None):
         applicant_name = (
             applicant.get("full_name", "An employee") if applicant else "An employee"
         )
-        day_text = f"{total_days:g} day{'s' if total_days != 1 else ''}"
+        # No day count in MC notifications: the days are only known (and shown
+        # to HR first) once the certificate end date is submitted.
+        day_text = (
+            "" if is_mc else f" ({total_days:g} day{'s' if total_days != 1 else ''})"
+        )
         label = "MC" if is_mc else data.leave_type
 
         # The employee's approver (reporting manager, or Super Admin Muriel
@@ -234,14 +279,14 @@ def apply_leave(auth_user_id: str, data, request: Optional[Request] = None):
         if leave_manager_id:
             recipients[leave_manager_id] = (
                 f"{applicant_name} applied for {label} from {data.from_date} to "
-                f"{data.to_date} ({day_text}). Awaiting your approval."
+                f"{data.to_date}{day_text}. Awaiting your approval."
             )
         for admin_id in get_employee_ids_for_role(ADMIN):
             recipients.setdefault(
                 admin_id,
                 (
                     f"{applicant_name} applied for {label} from {data.from_date} to "
-                    f"{data.to_date} ({day_text}). "
+                    f"{data.to_date}{day_text}. "
                     + (
                         "Sent to their approver for approval."
                         if leave_manager_id
@@ -256,7 +301,8 @@ def apply_leave(auth_user_id: str, data, request: Optional[Request] = None):
                 recipients.setdefault(
                     hr_id,
                     f"{applicant_name} applied for MC from {data.from_date} to "
-                    f"{data.to_date} ({day_text}). A medical certificate will follow.",
+                    f"{data.to_date}. The medical certificate will follow; the "
+                    "number of days is calculated from its end date.",
                 )
 
         recipients.pop(employee_id, None)
@@ -280,6 +326,7 @@ def apply_leave(auth_user_id: str, data, request: Optional[Request] = None):
             }
         )
 
+        mask_mc_days([leave_data], show_days=False, show_end_date=True)
         return success_response(message=LEAVE_APPLIED, data=leave_data)
 
     except HTTPException:
@@ -332,6 +379,8 @@ def get_my_leaves(auth_user_id: str):
             ascending=False,
         )
 
+        # Own MC: no days until HR has validated it.
+        mask_mc_days(records, show_days=False, show_end_date=True)
         return success_response(
             message="Leave requests fetched successfully.", data=records
         )
@@ -400,6 +449,7 @@ def get_all_leaves(
             end=end,
         )
 
+        mask_mc_days(records, show_days=True)  # HR / Super Admin see MC days first
         return success_response(
             message="Leave requests fetched successfully.",
             data={"records": records, "total": total, "page": page, "limit": limit},
@@ -473,6 +523,10 @@ def get_team_leaves(auth_user_id: str):
             query = query.in_("employee_id", report_ids)
 
         records = query.execute().data or []
+
+        # HR / Super Admin see the MC days as soon as the certificate end date
+        # is in; a leave manager only sees them after HR validates.
+        mask_mc_days(records, show_days=company_wide)
 
         if records:
             lm_rows = (
@@ -584,8 +638,11 @@ def update_leave_status(
                     # give the held days back
                     release_entitlement(existing, leave_type_full)
                     leave_repo.update(leave_id, {"balance_deducted": False})
-                elif not existing.get("balance_deducted"):
+                elif not existing.get("balance_deducted") and not existing.get(
+                    "mc_status"
+                ):
                     # requests created before days were held at apply time
+                    # (never for MC: its days are taken when HR validates it)
                     deduct_entitlement(
                         target_employee_id,
                         leave_type_full,

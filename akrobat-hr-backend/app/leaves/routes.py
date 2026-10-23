@@ -1,6 +1,7 @@
 from datetime import date
+from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 
 from app.leaves.schemas import (
     CreateLeaveRequest,
@@ -354,10 +355,14 @@ def upload_mc_certificate(
     leave_id: str,
     request: Request,
     file: UploadFile = File(...),
+    end_date: Optional[date] = Form(None),
     user=Depends(get_current_user),
 ):
-    """Step 2 of the MC flow: employee attaches the certificate. HR is notified."""
-    return upload_medical_certificate(user.id, leave_id, file, request=request)
+    """Step 2 of the MC flow: employee attaches the certificate and the end date
+    printed on it. The days are calculated from that end date and HR is notified."""
+    return upload_medical_certificate(
+        user.id, leave_id, file, end_date=end_date, request=request
+    )
 
 
 @router.get("/{leave_id}/medical-certificate")

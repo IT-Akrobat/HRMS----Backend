@@ -123,3 +123,14 @@ alter table notification_preferences
 -- (same as Paternity Leave). Hospitalisation stays HR-managed.
 update leave_types set hr_managed = false
 where leave_name = 'MATERNITY LEAVE';
+
+
+
+-- =====================================================================
+-- MC: days are calculated from the END DATE ON THE CERTIFICATE.
+-- The employee applies for MC (e.g. 24-25 Oct) and uploads the certificate
+-- later (e.g. 26 Oct). The certificate's end date is stored here; the
+-- leave's end_date / total_days only become final when HR validates.
+-- Safe to re-run.
+-- =====================================================================
+alter table leave_requests add column if not exists mc_end_date date;
