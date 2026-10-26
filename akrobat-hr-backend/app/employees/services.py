@@ -67,6 +67,12 @@ def get_employees(
             },
         )
 
+        # Resigned employees live in the Super Admin "Resigned Employees"
+        # archive (app/resignations), not in the normal employee list.
+        employees = [
+            emp for emp in employees if emp.get("employment_status") != "Resigned"
+        ]
+
         if role_id:
             profiles = (
                 supabase_admin.table("user_profiles")

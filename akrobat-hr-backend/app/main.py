@@ -39,6 +39,7 @@ from app.attendance.routes import router as attendance_router
 from app.shifts.routes import router as shift_router
 
 from app.leaves.routes import router as leave_router
+from app.saturday_swaps.routes import router as saturday_swap_router
 
 from app.locations.routes import router as location_router
 from app.holidays.routes import router as holiday_router
@@ -70,6 +71,8 @@ from app.access_control.routes import router as access_control_router
 from app.ot_calculator.routes import router as ot_calculator_router
 
 from app.audit_logs.routes import router as audit_log_router
+from app.resignations.routes import router as resignation_router
+from app.resignations.services import process_due_relievings
 
 from app.core.config import (
     ACCESS_TOKEN_COOKIE,
@@ -193,6 +196,17 @@ async def _start_site_visit_check_scheduler():
         minute=0,
         timezone=_get_company_timezone(),
         id="mc_validation_reminders",
+        replace_existing=True,
+    )
+    # Resigned employees: once the last working day arrives, disable login and
+    # move them to the Super Admin archive (see app/resignations/services.py).
+    _scheduler.add_job(
+        process_due_relievings,
+        "cron",
+        hour=0,
+        minute=15,
+        timezone=_get_company_timezone(),
+        id="process_due_relievings",
         replace_existing=True,
     )
     _scheduler.start()
@@ -360,6 +374,7 @@ app.include_router(permission_router)
 app.include_router(shift_router)
 app.include_router(attendance_router)
 app.include_router(leave_router)
+app.include_router(saturday_swap_router)
 
 app.include_router(location_router)
 app.include_router(holiday_router)
@@ -383,3 +398,4 @@ app.include_router(access_control_router)
 
 
 app.include_router(audit_log_router)
+app.include_router(resignation_router)

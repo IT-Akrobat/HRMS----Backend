@@ -134,3 +134,136 @@ where leave_name = 'MATERNITY LEAVE';
 -- Safe to re-run.
 -- =====================================================================
 alter table leave_requests add column if not exists mc_end_date date;
+
+
+
+-- =====================================================================
+-- Resigned employees (Super Admin only archive)
+-- Run AFTER 034. Safe to re-run.
+-- =====================================================================
+-- Lifecycle of one row:
+--   Serving Notice  -> employee still works, still appears everywhere
+--   Relieved        -> last working day reached (or "Relieve now"):
+--                      employees.employment_status = 'Resigned',
+--                      login disabled, removed from active lists
+--   Withdrawn       -> resignation cancelled during notice period
+-- Nothing is ever deleted: ON DELETE RESTRICT stops the employee row
+-- (and therefore all attendance / leave / payroll history) being removed.
+
+create table if not exists employee_resignations (
+    id uuid primary key default gen_random_uuid(),
+    employee_id uuid not null references employees(id) on delete restrict,
+
+    resignation_date date not null,
+    last_working_day date not null,
+    notice_period_days integer,
+
+    reason_category text not null,
+    reason_remarks text,
+    admin_remarks text,                 -- private, Super Admin only
+    eligible_for_rehire boolean,
+
+    status text not null default 'Serving Notice'
+        check (status in ('Serving Notice', 'Relieved', 'Withdrawn')),
+
+    accepted_by uuid references employees(id) on delete set null,
+    accepted_at timestamptz default now(),
+    relieved_at timestamptz,
+
+    exit_checklist jsonb not null default '{
+        "asset_returned": false,
+        "site_handover": false,
+        "knowledge_transfer": false,
+        "exit_interview": false,
+        "access_disabled": false
+    }'::jsonb,
+
+    pending_salary numeric(12,2) not null default 0,
+    leave_encashment numeric(12,2) not null default 0,
+    deductions numeric(12,2) not null default 0,
+    net_payable numeric(12,2) generated always as
+        (coalesce(pending_salary,0) + coalesce(leave_encashment,0) - coalesce(deductions,0)) stored,
+    settlement_status text not null default 'Pending'
+        check (settlement_status in ('Pending', 'Paid')),
+    settlement_paid_on date,
+
+    -- department / designation / manager as they were when the person resigned,
+    -- so the archive stays correct even if those records change later
+    snapshot jsonb not null default '{}'::jsonb,
+
+    created_at timestamptz default now(),
+    updated_at timestamptz default now()
+);
+
+-- one ACTIVE resignation per employee (a withdrawn one doesn't block a new one)
+create unique index if not exists employee_resignations_one_active
+    on employee_resignations (employee_id) where status <> 'Withdrawn';
+create index if not exists employee_resignations_status_idx
+    on employee_resignations (status);
+create index if not exists employee_resignations_lwd_idx
+    on employee_resignations (last_working_day);
+
+-- Only the backend (service role) touches this table. RLS on + no policies
+-- means the public anon key can never read it.
+alter table employee_resignations enable row level security;
+
+
+-- 037: Chennai full-day Saturday shift (9:00 AM - 6:00 PM)
+--
+-- Chennai staff who work Saturdays do 9:00-18:00 instead of the half-day
+-- Office / Inspection Saturday timings. _get_employee_shift() looks this
+-- row up by exact name when employees.work_location mentions "Chennai".
+-- Idempotent: safe to run more than once.
+
+insert into shifts (shift_name, start_time, end_time, working_hours, break_duration, grace_period, status)
+select 'OFFICE - SATURDAY (CHENNAI 9:00-6:00)', '09:00', '18:00', 9, 0, 10, 'Active'
+where not exists (
+    select 1 from shifts where shift_name = 'OFFICE - SATURDAY (CHENNAI 9:00-6:00)'
+);
+
+
+-- =====================================================================
+-- Saturday Swap
+--
+-- An employee on the "2nd & 4th Saturday" pattern (employees.alternate_saturday)
+-- can swap ONE of their regular working Saturdays (off_date) for ONE of their
+-- regular off Saturdays (work_date). Once the reporting manager approves it:
+--   * work_date  -> treated as a working day (check-in allowed, attendance
+--                   recorded as Present, shift/late rules apply)
+--   * off_date   -> treated as a week-off (no Absent / LOP)
+-- Nothing else is stored: app/attendance/services.py::_get_employee_shift()
+-- reads this table, so attendance, working-day status and leave day-counting
+-- all stay consistent automatically.
+--
+-- Safe to re-run.
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS saturday_swaps (
+    id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+    employee_id uuid NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+    work_date date NOT NULL,   -- normally-off Saturday the employee WILL work
+    off_date date NOT NULL,    -- normally-working Saturday the employee will skip
+    reason text NOT NULL,
+    status text NOT NULL DEFAULT 'Pending'
+        CHECK (status IN ('Pending', 'Approved', 'Rejected', 'Cancelled')),
+    approved_by uuid,
+    approved_date timestamptz,
+    comments text,
+    created_at timestamptz DEFAULT now(),
+    updated_at timestamptz DEFAULT now(),
+    CHECK (extract(dow FROM work_date) = 6),
+    CHECK (extract(dow FROM off_date) = 6),
+    CHECK (work_date <> off_date)
+);
+
+-- A given Saturday can be part of only one live (Pending / Approved) swap
+-- per employee.
+CREATE UNIQUE INDEX IF NOT EXISTS saturday_swaps_work_live_uq
+    ON saturday_swaps (employee_id, work_date)
+    WHERE status IN ('Pending', 'Approved');
+
+CREATE UNIQUE INDEX IF NOT EXISTS saturday_swaps_off_live_uq
+    ON saturday_swaps (employee_id, off_date)
+    WHERE status IN ('Pending', 'Approved');
+
+CREATE INDEX IF NOT EXISTS saturday_swaps_employee_idx
+    ON saturday_swaps (employee_id, status);

@@ -28,6 +28,11 @@ from app.core.database import supabase_admin
 from app.core import realtime
 from app.notifications.services import notify_employee
 from app.attendance.ot import compute_ot
+from app.saturday_swaps.lookup import (
+    get_swap_state,
+    OFF as SWAP_OFF,
+    WORK as SWAP_WORK,
+)
 from app.attendance.tz_helper import (
     resolve_record_timezone,
     timezone_from_coordinates,
@@ -239,7 +244,9 @@ def _is_second_or_fourth_saturday(for_date: date) -> bool:
     return nth in (2, 4)
 
 
-def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
+def _get_employee_shift(
+    employee_id: str, for_date: date, ignore_swaps: bool = False
+) -> Optional[dict]:
     """
     Resolves the shift that applies to `employee_id` on `for_date`:
       1. An active `employee_shift_history` row covering that date.
@@ -277,6 +284,12 @@ def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
          every other Saturday, this employee is off, same as
          works_saturday == False. Doesn't affect anyone with
          alternate_saturday left at its default (false).
+      7. Saturday Swap: an APPROVED row in `saturday_swaps` overrides the
+         pattern above for that one date -- the swapped-off Saturday
+         (off_date) resolves to no shift, and the swapped-in Saturday
+         (work_date) resolves to the employee's normal Saturday shift.
+         `ignore_swaps=True` returns the employee's regular pattern
+         (used to validate swap requests).
     """
 
     shift = None
@@ -354,6 +367,16 @@ def _get_employee_shift(employee_id: str, for_date: date) -> Optional[dict]:
 
     if not shift:
         return None
+
+    # Saturday Swap (approved only). OFF -> week-off; WORK -> force the normal
+    # Saturday shift resolution below even if the pattern says off.
+    if not ignore_swaps and for_date.weekday() == 5:
+        swap_state = get_swap_state(employee_id, for_date)
+        if swap_state == SWAP_OFF:
+            return None
+        if swap_state == SWAP_WORK:
+            works_saturday = True
+            alternate_saturday = False
 
     weekday_area = (shift.get("shift_name") or "").split(" - ")[0].strip().upper()
 
@@ -3395,6 +3418,88 @@ def get_attendance_timeline(auth_user_id: str, target_date: date):
     except Exception as e:
         logger.exception(e)
         internal_server_error("Unable to fetch attendance timeline.")
+
+
+def get_working_day_status(auth_user_id: str, target_date: date):
+    """
+    Tells the client whether `target_date` is a working day for this
+    employee, so the check-in card can show "today is your week off"
+    instead of a Check In button. Returns data:
+      {"date", "is_working_day": bool, "reason": str | None}
+
+    Off-day rules (same ones used elsewhere in this module):
+      - Sunday: fixed weekly off company-wide.
+      - Saturday: off when _get_employee_shift() resolves no shift for
+        that Saturday (works_saturday false, or an alternate-Saturday
+        employee on a non-2nd/4th Saturday).
+      - Public holiday (holidays table).
+    Never raises for lookup problems -- the UI treats this as best effort
+    and defaults to "working day" when it can't tell.
+    """
+    try:
+        employee_id = get_employee_id_for_auth_user(auth_user_id)
+
+        if not employee_id:
+            return success_response(
+                message="Working day status fetched successfully.",
+                data={
+                    "date": target_date.isoformat(),
+                    "is_working_day": True,
+                    "reason": None,
+                },
+            )
+
+        is_working_day = True
+        reason = None
+
+        if target_date.weekday() == 6:
+            is_working_day = False
+            reason = "Sunday is your week off."
+        elif target_date.weekday() == 5 and not _get_employee_shift(
+            employee_id, target_date
+        ):
+            is_working_day = False
+            reason = (
+                "Today is your week off (Saturday swap)."
+                if get_swap_state(employee_id, target_date) == SWAP_OFF
+                else "Today is your week off."
+            )
+
+        if is_working_day:
+            try:
+                hol = (
+                    supabase_admin.table("holidays")
+                    .select("holiday_name")
+                    .eq("holiday_date", target_date.isoformat())
+                    .limit(1)
+                    .execute()
+                )
+                if hol.data:
+                    name = (hol.data[0].get("holiday_name") or "").strip()
+                    is_working_day = False
+                    reason = (
+                        f"Today is a public holiday ({name})."
+                        if name
+                        else "Today is a public holiday."
+                    )
+            except Exception as e:
+                logger.warning(f"Could not check holidays for working-day status: {e}")
+
+        return success_response(
+            message="Working day status fetched successfully.",
+            data={
+                "date": target_date.isoformat(),
+                "is_working_day": is_working_day,
+                "reason": reason,
+            },
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception(e)
+        internal_server_error("Unable to fetch working day status.")
 
 
 # ==========================================================================
