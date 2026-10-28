@@ -547,7 +547,9 @@ def get_attendance_tab(employee_pk: str, month: Optional[str], status: Optional[
     _require_resignation(employee_pk)
     cols = (
         "attendance_date, check_in_time, check_out_time, working_minutes,"
-        " late_minutes, overtime_minutes, status"
+        " late_minutes, overtime_minutes, status,"
+        " check_in_latitude, check_in_longitude,"
+        " check_out_latitude, check_out_longitude"
     )
     rows = _fetch_all(
         lambda: supabase_admin.table("attendance")
@@ -555,6 +557,27 @@ def get_attendance_tab(employee_pk: str, month: Optional[str], status: Optional[
         .eq("employee_id", employee_pk)
         .order("attendance_date", desc=True)
     )
+
+    # check_in_time / check_out_time are stored as naive UTC. Tell the
+    # frontend which timezone each record happened in (GPS -> work
+    # location -> company setting) so it can show the real local clock time.
+    from app.attendance.services import _get_company_timezone
+    from app.attendance.tz_helper import resolve_record_timezone
+
+    emp_row = (
+        supabase_admin.table("employees")
+        .select("work_location")
+        .eq("id", employee_pk)
+        .limit(1)
+        .execute()
+        .data
+        or [{}]
+    )[0]
+    company_tz = _get_company_timezone()
+    for r in rows:
+        r["timezone"] = resolve_record_timezone(
+            r, emp_row.get("work_location"), company_tz
+        ).key
 
     worked = [r for r in rows if r.get("check_in_time")]
     summary = {
