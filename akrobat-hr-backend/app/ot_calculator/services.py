@@ -56,13 +56,14 @@ def get_ot_month(month: str, employee_id: Optional[str] = None):
             supabase_admin.table("employees")
             .select(
                 "id, employee_id, full_name, ot_weekday_end, ot_saturday_end, "
-                "work_location, nationality"
+                "work_location, nationality, employment_status"
             )
             .eq("ot_eligible", True)
         )
         if employee_id:
             query = query.eq("id", employee_id)
         staff = query.order("full_name").execute().data or []
+        staff = [s for s in staff if s.get("employment_status") != "Resigned"]
         if not staff:
             return success_response(
                 message="OT month fetched.", data={"month": month, "employees": []}

@@ -267,3 +267,236 @@ CREATE UNIQUE INDEX IF NOT EXISTS saturday_swaps_off_live_uq
 
 CREATE INDEX IF NOT EXISTS saturday_swaps_employee_idx
     ON saturday_swaps (employee_id, status);
+
+
+
+    -- =====================================================================
+-- 035_region_audit_logs.sql
+-- Audit logs (and login lockouts) follow the region of the employee who
+-- performed the action (audit_logs.employee_id = the actor).
+--
+--   Chennai staff action   -> CHENNAI
+--   Singapore staff action -> SINGAPORE
+--   system / no employee   -> NULL  (visible in both regions)
+--
+-- Needs 034 (set_region_from_employee function + employees.region).
+-- Safe to re-run.
+-- =====================================================================
+
+do $$
+declare
+    t text;
+begin
+    foreach t in array array['audit_logs', 'login_lockouts'] loop
+        if to_regclass('public.' || t) is null then
+            raise notice 'skip % (table not found)', t;
+            continue;
+        end if;
+
+        execute format('alter table %I add column if not exists region text', t);
+        execute format('create index if not exists %I on %I (region)',
+                       t || '_region_idx', t);
+
+        -- backfill old rows from the actor
+        execute format(
+            'update %I x set region = e.region
+               from employees e
+              where x.employee_id = e.id and x.region is null', t);
+
+        -- new rows
+        execute format('drop trigger if exists trg_%s_region on %I', t, t);
+        execute format(
+            'create trigger trg_%s_region
+               before insert on %I
+               for each row execute function set_region_from_employee()', t, t);
+    end loop;
+end $$;
+
+-- check
+select region, count(*) from audit_logs group by region;
+
+
+-- =====================================================================
+-- 034_region_scoping.sql
+-- Chennai / Singapore complete data separation.
+--
+-- region values: 'CHENNAI' | 'SINGAPORE'
+--
+-- STRICT tables   (employee data)  -> every row MUST belong to one region.
+--                                     region is copied from employees.region
+--                                     automatically by a trigger.
+-- SHARED-OK tables (master data)   -> region NULL = shared by both regions,
+--                                     otherwise visible only in that region.
+--
+-- Safe to re-run (idempotent).
+-- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- 1. employees.region  (the source of truth)
+-- ---------------------------------------------------------------------
+alter table employees add column if not exists region text;
+
+alter table employees drop constraint if exists employees_region_chk;
+alter table employees
+    add constraint employees_region_chk
+    check (region is null or region in ('CHENNAI', 'SINGAPORE'));
+
+-- Backfill from the old free-text work_location.
+-- RULE: work location mentions Chennai (or India) -> CHENNAI,
+--       everyone else (Singapore, blank, anything else) -> SINGAPORE.
+update employees
+set region = case
+        when work_location ilike '%chennai%' or work_location ilike '%india%'
+            then 'CHENNAI'
+        else 'SINGAPORE'
+    end
+where region is null;
+
+create index if not exists employees_region_idx on employees (region);
+
+-- Keep region in step with work_location when region isn't supplied.
+create or replace function employees_derive_region() returns trigger as $$
+begin
+    if new.region is null then
+        if new.work_location ilike '%chennai%' or new.work_location ilike '%india%' then
+            new.region := 'CHENNAI';
+        else
+            new.region := 'SINGAPORE';
+        end if;
+    end if;
+    return new;
+end;
+$$ language plpgsql;
+
+drop trigger if exists trg_employees_derive_region on employees;
+create trigger trg_employees_derive_region
+    before insert or update of work_location, region on employees
+    for each row execute function employees_derive_region();
+
+-- ---------------------------------------------------------------------
+-- 2. STRICT tables: copy region from the employee row
+-- ---------------------------------------------------------------------
+create or replace function set_region_from_employee() returns trigger as $$
+begin
+    if new.region is null and new.employee_id is not null then
+        select e.region into new.region
+        from employees e
+        where e.id = new.employee_id;
+    end if;
+    return new;
+end;
+$$ language plpgsql;
+
+do $$
+declare
+    t text;
+    strict_tables text[] := array[
+        'attendance',
+        'attendance_corrections',
+        'attendance_site_visits',
+        'attendance_outdoor_visits',
+        'employee_site_assignments',
+        'employee_shift_history',
+        'leave_requests',
+        'leave_balances',
+        'leave_replacement_credits',
+        'employee_leave_overrides',
+        'employee_leave_tier',
+        'overtime_requests',
+        'overtime_summary',
+        'ot_adjustments',
+        'payroll',
+        'employee_resignations',
+        'saturday_swaps',
+        'employee_documents',
+        'documents',
+        'expenses'
+    ];
+begin
+    foreach t in array strict_tables loop
+        if to_regclass('public.' || t) is null then
+            raise notice 'skip % (table not found)', t;
+            continue;
+        end if;
+
+        begin
+            execute format('alter table %I add column if not exists region text', t);
+            execute format('create index if not exists %I on %I (region)',
+                           t || '_region_idx', t);
+            execute format(
+                'update %I x set region = e.region
+                   from employees e
+                  where x.employee_id = e.id and x.region is null', t);
+            execute format('drop trigger if exists trg_%s_region on %I', t, t);
+            execute format(
+                'create trigger trg_%s_region
+                   before insert on %I
+                   for each row execute function set_region_from_employee()', t, t);
+        exception when others then
+            raise notice 'region setup failed for %: %', t, sqlerrm;
+        end;
+    end loop;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 3. SHARED-OK master tables (NULL = shared)
+-- ---------------------------------------------------------------------
+do $$
+declare
+    t text;
+    master_tables text[] := array[
+        'departments',
+        'designations',
+        'shifts',
+        'announcements',
+        'locations',
+        'company_locations'
+    ];
+begin
+    foreach t in array master_tables loop
+        if to_regclass('public.' || t) is null then
+            raise notice 'skip % (table not found)', t;
+            continue;
+        end if;
+        execute format('alter table %I add column if not exists region text', t);
+        execute format('create index if not exists %I on %I (region)',
+                       t || '_region_idx', t);
+    end loop;
+end $$;
+
+-- Sites / office locations: guess from the address text.
+update locations
+set region = case
+        when coalesce(address, '') || ' ' || location_name ilike '%chennai%'
+          or coalesce(address, '') || ' ' || location_name ilike '%india%'
+          or coalesce(address, '') || ' ' || location_name ilike '%tamil%'
+            then 'CHENNAI'
+        else 'SINGAPORE'
+    end
+where region is null;
+
+-- Announcements: take the region of whoever posted it.
+update announcements a
+set region = e.region
+from employees e
+where a.created_by = e.id and a.region is null;
+
+-- Departments / designations / shifts stay NULL (= shared) until you
+-- assign them. Examples:
+--   update departments set region = 'SINGAPORE' where department_name in ('...');
+
+-- ---------------------------------------------------------------------
+-- 4. CHECK: employees that still have no region (fix these manually!)
+-- ---------------------------------------------------------------------
+-- select id, employee_id, full_name, work_location
+-- from employees where region is null order by full_name;
+--
+-- update employees set region = 'CHENNAI'   where id = '...';
+-- update employees set region = 'SINGAPORE' where id = '...';
+
+
+-- Part-time employees: no fixed shift, no leave, no OT, no late/early
+-- rules. Only worked time (check-in -> check-out, minus recorded breaks)
+-- is calculated. Default false => every existing employee is unaffected.
+alter table employees
+    add column if not exists is_part_time boolean not null default false;

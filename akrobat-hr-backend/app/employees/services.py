@@ -9,6 +9,7 @@ from app.core.logger import logger
 from app.core.exceptions import internal_server_error, conflict, bad_request
 from app.core.messages import EMPLOYEE_CREATED, EMPLOYEE_UPDATED, EMPLOYEE_DELETED
 from app.core.constants import ACTIVE, ADMIN
+from app.core.region import region_for_work_location, sync_employee_region
 from app.core.helpers.employee_helper import (
     generate_employee_id,
     generate_temp_password,
@@ -20,6 +21,7 @@ from app.core.helpers.employee_helper import (
     is_operation_every_saturday,
     get_employee_id_for_auth_user,
     get_all_report_ids,
+    get_resigned_employee_ids,
     is_field_employee,
     placeholder_login_email,
     username_taken,
@@ -69,8 +71,12 @@ def get_employees(
 
         # Resigned employees live in the Super Admin "Resigned Employees"
         # archive (app/resignations), not in the normal employee list.
+        resigned_ids = get_resigned_employee_ids()
         employees = [
-            emp for emp in employees if emp.get("employment_status") != "Resigned"
+            emp
+            for emp in employees
+            if emp.get("employment_status") != "Resigned"
+            and emp["id"] not in resigned_ids
         ]
 
         if role_id:
@@ -269,6 +275,14 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
                 ),
                 "employment_status": data.employment_status,
                 "work_location": data.work_location,
+                # Region follows the work location (Singapore Office ->
+                # SINGAPORE), not whichever Chennai/Singapore tab the
+                # creator had open.
+                **(
+                    {"region": region_for_work_location(data.work_location)}
+                    if region_for_work_location(data.work_location)
+                    else {}
+                ),
                 "working_location": data.working_location,
                 "shift_id": resolved_shift_id,
                 "profile_photo": data.profile_photo,
@@ -278,6 +292,7 @@ def create_employee(data, current_user=None, request: Optional[Request] = None):
                 "working_days_per_week": data.working_days_per_week,
                 "works_saturday": works_saturday,
                 "alternate_saturday": alternate_saturday,
+                "is_part_time": bool(data.is_part_time),
                 "saturday_shift_id": (
                     str(data.saturday_shift_id) if data.saturday_shift_id else None
                 ),
@@ -578,7 +593,20 @@ def update_employee(
             if key in update_data and update_data[key] is not None:
                 update_data[key] = str(update_data[key])
 
+        # Work location decides the region (Chennai / Singapore tab). If it
+        # moved to the other region, move the employee and all their
+        # region-stamped records with it.
+        new_region = region_for_work_location(update_data.get("work_location"))
+        region_changed = bool(
+            new_region and new_region != existing_employee.get("region")
+        )
+        if region_changed:
+            update_data["region"] = new_region
+
         updated_employee = employee_repo.update(employee_id, update_data)
+
+        if region_changed:
+            sync_employee_region(employee_id, new_region)
 
         # Leave tier reassignment. assign_employee_leave_tier() upserts
         # (one row per employee+leave_type via the unique constraint), so
@@ -909,9 +937,10 @@ def get_employee_directory():
             .execute()
         )
 
+        resigned_ids = get_resigned_employee_ids()
         return success_response(
             message="Directory fetched successfully.",
-            data=response.data or [],
+            data=[r for r in (response.data or []) if r["id"] not in resigned_ids],
         )
 
     except HTTPException:

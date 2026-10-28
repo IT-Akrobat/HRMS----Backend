@@ -6,6 +6,7 @@ from app.core.database import supabase_admin
 from app.core.responses import success_response
 from app.core.helpers.employee_helper import (
     is_operation_every_saturday_name,
+    get_excluded_employee_ids,
     get_super_admin_employee_ids,
 )
 
@@ -95,6 +96,8 @@ def employee_report():
             """).execute()
 
         employees = response.data or []
+        # Resigned employees are archived (Super Admin "Resigned Employees" page)
+        employees = [e for e in employees if e.get("employment_status") != "Resigned"]
 
         # Reporting manager — plain lookup against the roster we already
         # have in memory, keyed by employees.id (manager_id points there).
@@ -232,7 +235,7 @@ def attendance_report():
         from app.attendance.tz_helper import resolve_record_timezone
 
         company_tz = _get_company_timezone()
-        sa_ids = get_super_admin_employee_ids()  # Super Admins are excluded
+        sa_ids = get_excluded_employee_ids()  # Super Admins are excluded
         rows = [r for r in (response.data or []) if r.get("employee_id") not in sa_ids]
         for row in rows:
             emp = row.get("employees") or {}
@@ -280,7 +283,7 @@ def today_attendance():
             )
             """).eq("attendance_date", today).execute()
 
-        sa_ids = get_super_admin_employee_ids()  # Super Admins are excluded
+        sa_ids = get_excluded_employee_ids()  # Super Admins are excluded
         return success_response(
             message="Today's attendance fetched successfully",
             data=[
@@ -386,7 +389,7 @@ def dashboard_report():
 
     try:
 
-        sa_ids = get_super_admin_employee_ids()  # Super Admins are excluded
+        sa_ids = get_excluded_employee_ids()  # Super Admins are excluded
 
         employees = len(
             [
@@ -929,7 +932,7 @@ def all_employees_monthly_attendance_report(month: str):
             .order("full_name")
         )
 
-        sa_ids = get_super_admin_employee_ids()  # Super Admins are excluded
+        sa_ids = get_excluded_employee_ids()  # Super Admins are excluded
         employees = [e for e in employees if e["id"] not in sa_ids]
 
         attendance = _fetch_all(

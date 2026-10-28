@@ -159,6 +159,17 @@ def apply_leave(auth_user_id: str, data, request: Optional[Request] = None):
         if data.to_date < data.from_date:
             bad_request("to_date must be on or after from_date.")
 
+        # Part-time staff have no leave entitlement.
+        _pt = (
+            supabase_admin.table("employees")
+            .select("is_part_time")
+            .eq("id", employee_id)
+            .maybe_single()
+            .execute()
+        )
+        if _pt and _pt.data and _pt.data.get("is_part_time"):
+            forbidden("Part-time employees are not eligible for leave.")
+
         leave_type = _resolve_leave_type(data.leave_type)
         leave_type_id = leave_type["id"]
         is_mc = leave_type["leave_name"].strip().upper() == SICK_LEAVE

@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from app.core.database import supabase_admin
 from app.core.config import PEXELS_API_KEY, PEXELS_SEARCH_QUERY, QUOTE_API_URL
 from app.core.logger import logger
-from app.core.helpers.employee_helper import get_super_admin_employee_ids
+from app.core.helpers.employee_helper import get_excluded_employee_ids
 
 # Same "today" the attendance module files check-ins under (company-local
 # calendar day), so the dashboard's Today/Week/Month windows line up with
@@ -47,7 +47,7 @@ def get_admin_dashboard():
 
         today = str(date.today())
 
-        sa_ids = get_super_admin_employee_ids()  # Super Admins are not counted
+        sa_ids = get_excluded_employee_ids()  # Super Admins are not counted
 
         employees = supabase_admin.table("employees").select("id").execute()
 
@@ -134,7 +134,7 @@ def get_attendance_trend(days: int = 7):
 
         start = end - timedelta(days=days - 1)
 
-        sa_ids = get_super_admin_employee_ids()  # Super Admins are not counted
+        sa_ids = get_excluded_employee_ids()  # Super Admins are not counted
 
         total_employees = len(
             [
@@ -255,7 +255,7 @@ def get_attendance_trend_detail(days: int = 7, status: str = "onTime"):
             )
             .order("id")
         )
-        sa_ids = get_super_admin_employee_ids()  # Super Admins are not counted
+        sa_ids = get_excluded_employee_ids()  # Super Admins are not counted
         emp_by_id = {e["id"]: e for e in employees if e["id"] not in sa_ids}
 
         def to_person(employee_id, day_count):
@@ -502,6 +502,15 @@ def get_on_leave_today():
 
         records = response.data or []
 
+        # Resigned (relieved) employees are archived -- never show them in
+        # "On Leave Today" even if an approved leave still covers today.
+        excluded_ids = get_excluded_employee_ids()
+        records = [
+            r
+            for r in records
+            if (r.get("employees") or {}).get("id") not in excluded_ids
+        ]
+
         # An employee can have more than one *approved* leave_requests row
         # covering today (e.g. overlapping half-day entries, or a leave
         # split across leave types). This widget shows "who's out today",
@@ -555,9 +564,14 @@ def get_department_distribution():
         )
 
         employees = (
-            supabase_admin.table("employees").select("department_id").execute().data
+            supabase_admin.table("employees")
+            .select("department_id, employment_status")
+            .execute()
+            .data
             or []
         )
+        # Resigned employees are archived -- not part of any department count
+        employees = [e for e in employees if e.get("employment_status") != "Resigned"]
 
         counts = {}
         for row in employees:
@@ -599,17 +613,23 @@ TOP_PERFORMERS_MIN_PRESENT_DAYS = 3
 
 
 def get_top_performers(days: int = 30, limit: int = 5):
-    """Ranks employees by attendance reliability over the last `days`
-    days: punctuality rate (share of present days with zero late_minutes)
-    first, then days present, then overtime minutes as tiebreakers.
+    """Ranks employees over the last `days` days by:
+      1. total work hours (sum of working_minutes) -- highest first,
+      2. then on-time check-in days (late_minutes == 0),
+      3. then weekday days present.
 
-    There's no separate "performance rating" concept anywhere in this
-    schema, so rather than invent one, this is derived entirely from the
-    `attendance` table (see sql/001_schema.sql) — the same source of
-    truth the attendance trend chart and audit-log activity use.
+    Only real working days are counted: Saturdays, Sundays and public
+    holidays (the employee's country calendar) are left out of everything
+    -- hours, present days and absent days -- and days covered by an
+    approved leave are not counted as absent. A working weekday with no
+    attendance record (before today) IS counted as an absent day, so
+    working_days = present_days + absent_days and the percentage is
+    on_time_days / working_days. Days before the employee's joining date
+    are ignored.
     """
 
     try:
+        from app.leaves.working_days import _holiday_dates, detect_holiday_country
 
         end = date.today()
 
@@ -617,7 +637,10 @@ def get_top_performers(days: int = 30, limit: int = 5):
 
         rows = (
             supabase_admin.table("attendance")
-            .select("employee_id, late_minutes, working_minutes, overtime_minutes")
+            .select(
+                "employee_id, attendance_date, status, "
+                "late_minutes, working_minutes, overtime_minutes"
+            )
             .gte("attendance_date", start.isoformat())
             .lte("attendance_date", end.isoformat())
             .execute()
@@ -625,45 +648,33 @@ def get_top_performers(days: int = 30, limit: int = 5):
             or []
         )
 
-        sa_ids = get_super_admin_employee_ids()  # Super Admins are not ranked
+        sa_ids = get_excluded_employee_ids()  # Super Admins are not ranked
         rows = [r for r in rows if r.get("employee_id") not in sa_ids]
 
-        by_employee = {}
+        rows_by_emp = {}
         for row in rows:
             emp_id = row.get("employee_id")
-            if not emp_id:
+            if not emp_id or row.get("status") == "Absent":
                 continue
-            bucket = by_employee.setdefault(
-                emp_id,
-                {
-                    "present_days": 0,
-                    "on_time_days": 0,
-                    "working_minutes": 0,
-                    "overtime_minutes": 0,
-                },
-            )
-            bucket["present_days"] += 1
-            if (row.get("late_minutes") or 0) == 0:
-                bucket["on_time_days"] += 1
-            bucket["working_minutes"] += row.get("working_minutes") or 0
-            bucket["overtime_minutes"] += row.get("overtime_minutes") or 0
+            try:
+                day = date.fromisoformat(str(row["attendance_date"])[:10])
+            except (KeyError, ValueError, TypeError):
+                continue
+            rows_by_emp.setdefault(emp_id, {})[day] = row
 
-        eligible = {
-            emp_id: b
-            for emp_id, b in by_employee.items()
-            if b["present_days"] >= TOP_PERFORMERS_MIN_PRESENT_DAYS
-        }
-
-        if not eligible:
+        if not rows_by_emp:
             return {"days": days, "employees": []}
+
+        emp_ids = list(rows_by_emp.keys())
 
         employees = (
             supabase_admin.table("employees")
             .select(
-                "id, full_name, employee_id, profile_photo, "
+                "id, full_name, employee_id, profile_photo, joining_date, "
+                "work_location, nationality, "
                 "departments!employees_department_id_fkey(department_name)"
             )
-            .in_("id", list(eligible.keys()))
+            .in_("id", emp_ids)
             .execute()
             .data
             or []
@@ -671,12 +682,80 @@ def get_top_performers(days: int = 30, limit: int = 5):
 
         emp_by_id = {e["id"]: e for e in employees}
 
+        # Approved leave days per employee (not counted as absent).
+        leave_days = {}
+        try:
+            leaves = (
+                supabase_admin.table("leave_requests")
+                .select("employee_id, start_date, end_date")
+                .eq("status", "Approved")
+                .in_("employee_id", emp_ids)
+                .lte("start_date", end.isoformat())
+                .gte("end_date", start.isoformat())
+                .execute()
+                .data
+                or []
+            )
+            for lv in leaves:
+                d = date.fromisoformat(str(lv["start_date"])[:10])
+                last = date.fromisoformat(str(lv["end_date"])[:10])
+                bucket = leave_days.setdefault(lv["employee_id"], set())
+                while d <= last:
+                    bucket.add(d)
+                    d += timedelta(days=1)
+        except Exception as e:
+            logger.error(f"Top performers: could not load approved leave: {e}")
+
+        holidays_by_country = {}
+
+        def holidays_for(emp):
+            country = detect_holiday_country(emp)
+            if country not in holidays_by_country:
+                try:
+                    holidays_by_country[country] = _holiday_dates(country, start, end)
+                except Exception as e:
+                    logger.error(f"Top performers: could not load holidays: {e}")
+                    holidays_by_country[country] = set()
+            return holidays_by_country[country]
+
         results = []
-        for emp_id, b in eligible.items():
+        for emp_id, by_date in rows_by_emp.items():
             emp = emp_by_id.get(emp_id)
             if not emp:
                 continue
-            punctuality_rate = b["on_time_days"] / b["present_days"]
+
+            first_day = start
+            try:
+                joined = date.fromisoformat(str(emp.get("joining_date"))[:10])
+                if joined > first_day:
+                    first_day = joined
+            except (TypeError, ValueError):
+                pass
+
+            holidays = holidays_for(emp)
+            on_leave = leave_days.get(emp_id, set())
+
+            present_days = on_time_days = absent_days = 0
+            working_minutes = overtime_minutes = 0
+
+            day = first_day
+            while day <= end:
+                if day.weekday() < 5 and day not in holidays:
+                    row = by_date.get(day)
+                    if row:
+                        present_days += 1
+                        if (row.get("late_minutes") or 0) == 0:
+                            on_time_days += 1
+                        working_minutes += row.get("working_minutes") or 0
+                        overtime_minutes += row.get("overtime_minutes") or 0
+                    elif day < end and day not in on_leave:
+                        absent_days += 1
+                day += timedelta(days=1)
+
+            if present_days < TOP_PERFORMERS_MIN_PRESENT_DAYS:
+                continue
+
+            working_days = present_days + absent_days
             results.append(
                 {
                     "employee_id": emp_id,
@@ -686,19 +765,21 @@ def get_top_performers(days: int = 30, limit: int = 5):
                     "department_name": (emp.get("departments") or {}).get(
                         "department_name"
                     ),
-                    "present_days": b["present_days"],
-                    "on_time_days": b["on_time_days"],
-                    "punctuality_rate": round(punctuality_rate * 100, 1),
-                    "working_minutes": b["working_minutes"],
-                    "overtime_minutes": b["overtime_minutes"],
+                    "present_days": present_days,
+                    "absent_days": absent_days,
+                    "working_days": working_days,
+                    "on_time_days": on_time_days,
+                    "punctuality_rate": round(on_time_days / working_days * 100, 1),
+                    "working_minutes": working_minutes,
+                    "overtime_minutes": overtime_minutes,
                 }
             )
 
         results.sort(
             key=lambda r: (
-                r["punctuality_rate"],
+                r["working_minutes"],
+                r["on_time_days"],
                 r["present_days"],
-                r["overtime_minutes"],
             ),
             reverse=True,
         )

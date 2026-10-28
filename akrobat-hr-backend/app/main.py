@@ -10,6 +10,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from app.core.limiter import limiter
+from app.core.region import RegionMiddleware
 from app.core.ws_tickets import redeem_ticket
 from app.attendance.services import (
     flag_missed_site_visits_for_all_employees,
@@ -114,6 +115,10 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # behind a generic "Failed to fetch" / network-error message instead of
 # the CSRF message the frontend actually needs to see.
 app.add_middleware(CSRFMiddleware)
+
+# Chennai / Singapore: resolves the active region per request (app/core/region.py).
+# Added before CORS so CORS stays the outermost layer.
+app.add_middleware(RegionMiddleware)
 
 app.add_middleware(
     CORSMiddleware,

@@ -481,6 +481,7 @@ def get_me(auth_user) -> dict:
             address,
             work_location,
             working_location,
+            region,
             manager_id,
             outdoor_checkin_enabled,
 
@@ -619,6 +620,7 @@ def get_me(auth_user) -> dict:
             # same joins) showed the real values for the same person.
             "work_location": employee.get("work_location"),
             "working_location": employee.get("working_location"),
+            "region": employee.get("region"),
             "manager": manager,
             "shift": employee.get("shifts"),
             "date_of_birth": (

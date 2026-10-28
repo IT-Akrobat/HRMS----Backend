@@ -660,7 +660,7 @@ def get_all_report_ids(manager_employee_id: str, max_depth: int = 10) -> list[st
         all_report_ids.update(new_ids)
         frontier = new_ids
 
-    return list(all_report_ids)
+    return list(all_report_ids - get_resigned_employee_ids())
 
 
 # ==========================================
@@ -763,3 +763,47 @@ def get_super_admin_employee_ids() -> set:
     from app.core.constants import ADMIN as _ADMIN_ROLE
 
     return set(get_employee_ids_for_role(_ADMIN_ROLE))
+
+
+HIDE_SERVING_NOTICE = True
+
+
+def get_resigned_employee_ids() -> set:
+    """
+    employees.id of everyone whose employment_status is 'Resigned' (i.e. already
+    relieved). They live ONLY in the Super Admin "Resigned Employees" archive,
+    so every normal list / count / report leaves them out. Fails open (empty
+    set) if the lookup breaks, so a hiccup can never hide real employees.
+    """
+    try:
+        rows = (
+            supabase_admin.table("employees")
+            .select("id")
+            .eq("employment_status", "Resigned")
+            .execute()
+            .data
+            or []
+        )
+        ids = {r["id"] for r in rows}
+
+        # Anyone listed on the Resigned Employees page (Serving Notice or
+        # Relieved) is treated as resigned everywhere else. Set to False if
+        # people serving notice should still appear in normal pages.
+        if HIDE_SERVING_NOTICE:
+            res = (
+                supabase_admin.table("employee_resignations")
+                .select("employee_id")
+                .in_("status", ["Serving Notice", "Relieved"])
+                .execute()
+                .data
+                or []
+            )
+            ids |= {r["employee_id"] for r in res}
+        return ids
+    except Exception:
+        return set()
+
+
+def get_excluded_employee_ids() -> set:
+    """Super Admins + resigned employees: left out of stats, rosters, reports."""
+    return get_super_admin_employee_ids() | get_resigned_employee_ids()

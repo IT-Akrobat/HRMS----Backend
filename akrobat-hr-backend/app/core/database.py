@@ -4,6 +4,7 @@ from supabase import create_client
 from supabase.client import ClientOptions
 
 from app.core.config import SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
+from app.core.region import scope_table
 
 # create_client() defaults to auto_refresh_token=True + persist_session=True.
 # That's the right default for a browser/mobile app talking to Supabase
@@ -55,6 +56,14 @@ class _ThreadLocalSupabaseClient:
             client = create_client(self._url, self._key, options=_SERVER_SIDE_OPTIONS)
             self._local.client = client
         return client
+
+    def table(self, name):
+        # Chennai / Singapore separation: tables listed in app/core/region.py
+        # are auto-filtered by the active region of the current request.
+        return scope_table(self._get().table(name), name)
+
+    def from_(self, name):
+        return self.table(name)
 
     def __getattr__(self, name):
         return getattr(self._get(), name)

@@ -18,6 +18,7 @@ from app.core.helpers.employee_helper import (
     is_manager_of,
     get_all_report_ids,
     get_employee_ids_for_role,
+    get_excluded_employee_ids,
     get_super_admin_employee_ids,
     get_field_employee_ids,
     is_operation_every_saturday_name,
@@ -472,6 +473,27 @@ def _get_employee_shift(
     return shift
 
 
+def _is_part_time(employee_id: str) -> bool:
+    """
+    True for employees flagged employees.is_part_time (sql/035). Part-timers
+    have no shift, leave, OT, late or early-checkout rules -- only the time
+    between check-in and check-out (minus recorded breaks) is calculated.
+    Fails safe to False so a lookup problem never changes normal behaviour.
+    """
+    try:
+        resp = (
+            supabase_admin.table("employees")
+            .select("is_part_time")
+            .eq("id", employee_id)
+            .maybe_single()
+            .execute()
+        )
+        return bool(resp and resp.data and resp.data.get("is_part_time"))
+    except Exception as e:
+        logger.error(f"Failed to read is_part_time for {employee_id}: {e}")
+        return False
+
+
 def _late_minutes(
     check_in_time: datetime,
     for_date: date,
@@ -777,6 +799,10 @@ def check_in(auth_user_id: str, data, request: Optional[Request] = None):
         if is_super_admin:
             late_minutes = 0
 
+        # Part-time: no shift => never late.
+        if _is_part_time(employee_id):
+            late_minutes = 0
+
         payload = {
             "employee_id": employee_id,
             "attendance_date": today.isoformat(),
@@ -972,6 +998,18 @@ def _compute_checkout_fields(
 
     gross_minutes = int((check_out_time - check_in_time).total_seconds() / 60)
 
+    # Part-time: working time = check-out - check-in - recorded breaks.
+    # No auto break, no minimum hours, no early checkout, no OT, no half day.
+    if _is_part_time(employee_id):
+        pt_break = break_minutes or 0
+        return {
+            "break_minutes": pt_break,
+            "working_minutes": max(0, gross_minutes - pt_break),
+            "early_checkout_minutes": 0,
+            "overtime_minutes": 0,
+            "status": "Present",
+        }
+
     shift = _get_employee_shift(employee_id, attendance_date)
     rule = _get_attendance_rule()
 
@@ -1152,7 +1190,7 @@ def get_attendance_reminder_status(auth_user_id: str):
                 message="No reminder due.", data={"reminder_due": False}
             )
 
-        if employee_id in get_super_admin_employee_ids():
+        if employee_id in get_super_admin_employee_ids() or _is_part_time(employee_id):
             return success_response(
                 message="No reminder due.", data={"reminder_due": False}
             )
@@ -1328,7 +1366,7 @@ def get_checkout_reminder_status(auth_user_id: str):
                 message="No reminder due.", data={"reminder_due": False}
             )
 
-        if employee_id in get_super_admin_employee_ids():
+        if employee_id in get_super_admin_employee_ids() or _is_part_time(employee_id):
             return success_response(
                 message="No reminder due.", data={"reminder_due": False}
             )
@@ -3348,10 +3386,13 @@ def get_my_attendance(
             except Exception as e:  # never break the calendar over this
                 logger.warning(f"Could not load holidays for attendance: {e}")
 
+            part_time = _is_part_time(employee_id)
             for d in _daterange(from_date, last_synth_day):
                 key = d.isoformat()
                 if key in rows_by_date:
                     continue
+                if part_time:
+                    continue  # no Absent / Weekly Off / Holiday rows
                 if d.weekday() >= 5:  # Sat/Sun — see docstring note in
                     # get_team_attendance_report() re: "working day" being
                     # simplified to Mon-Fri company-wide for now.
@@ -3451,6 +3492,17 @@ def get_working_day_status(auth_user_id: str, target_date: date):
 
         is_working_day = True
         reason = None
+
+        # Part-time: any day (incl. Sat/Sun/holidays) is a working day.
+        if _is_part_time(employee_id):
+            return success_response(
+                message="Working day status fetched successfully.",
+                data={
+                    "date": target_date.isoformat(),
+                    "is_working_day": True,
+                    "reason": None,
+                },
+            )
 
         if target_date.weekday() == 6:
             is_working_day = False
@@ -3990,7 +4042,7 @@ def get_org_attendance_report(
             roster_query = roster_query.eq("id", employee_id)
 
         roster = (roster_query.order("full_name").execute()).data or []
-        sa_ids = get_super_admin_employee_ids()  # Super Admins are excluded
+        sa_ids = get_excluded_employee_ids()  # Super Admins are excluded
         roster = [emp for emp in roster if emp["id"] not in sa_ids]
         company_tz = _get_company_timezone()
 
@@ -4190,7 +4242,7 @@ def get_all_attendance(
             query = query.eq("attendance_date", target_date.isoformat())
 
         # Super Admins are not part of attendance tracking.
-        sa_ids = list(get_super_admin_employee_ids())
+        sa_ids = list(get_excluded_employee_ids())
         if sa_ids:
             query = query.not_.in_("employee_id", sa_ids)
 
@@ -4267,7 +4319,7 @@ def get_attendance_analytics(from_date: date, to_date: date):
             .execute()
         )
 
-        sa_ids = get_super_admin_employee_ids()  # Super Admins are excluded
+        sa_ids = get_excluded_employee_ids()  # Super Admins are excluded
         rows = [r for r in (response.data or []) if r.get("employee_id") not in sa_ids]
         total_records = len(rows)
         present_count = sum(1 for r in rows if r.get("status") == "Present")
@@ -4408,3 +4460,121 @@ def admin_update_attendance(
     except Exception as e:
         logger.exception(e)
         internal_server_error("Unable to update attendance record.")
+
+
+# ==========================================================================
+# PART-TIME MONTHLY SUMMARY (days worked + total hours for a month)
+# ==========================================================================
+
+
+def _parse_month(month: Optional[str]):
+    """'YYYY-MM' -> (first_day, last_day). Defaults to the current month."""
+    if month:
+        try:
+            y, m = month.split("-")
+            first = date(int(y), int(m), 1)
+        except Exception:
+            bad_request("month must be in YYYY-MM format.")
+    else:
+        t = _today_in_company_tz()
+        first = date(t.year, t.month, 1)
+    nxt = date(first.year + (first.month // 12), (first.month % 12) + 1, 1)
+    return first, nxt - timedelta(days=1)
+
+
+def _part_time_summaries(employees: list, first: date, last: date) -> list:
+    ids = [e["id"] for e in employees]
+    if not ids:
+        return []
+    rows = (
+        supabase_admin.table("attendance")
+        .select(
+            "employee_id, attendance_date, check_in_time, check_out_time, working_minutes, break_minutes"
+        )
+        .in_("employee_id", ids)
+        .gte("attendance_date", first.isoformat())
+        .lte("attendance_date", last.isoformat())
+        .order("attendance_date", desc=False)
+        .execute()
+    ).data or []
+
+    by_emp: dict = {}
+    for r in rows:
+        by_emp.setdefault(r["employee_id"], []).append(r)
+
+    out = []
+    for e in employees:
+        recs = by_emp.get(e["id"], [])
+        done = [r for r in recs if r.get("check_out_time")]
+        total = sum((r.get("working_minutes") or 0) for r in done)
+        out.append(
+            {
+                "employee_id": e["id"],
+                "employee_code": e.get("employee_id"),
+                "full_name": e.get("full_name"),
+                "month": first.strftime("%Y-%m"),
+                "days_worked": len(done),
+                "open_days": len(recs) - len(done),  # checked in, not out yet
+                "total_working_minutes": total,
+                "total_working_hours": round(total / 60, 2),
+                "daily": [
+                    {
+                        "date": r["attendance_date"],
+                        "check_in_time": r.get("check_in_time"),
+                        "check_out_time": r.get("check_out_time"),
+                        "break_minutes": r.get("break_minutes") or 0,
+                        "working_minutes": r.get("working_minutes") or 0,
+                    }
+                    for r in recs
+                ],
+            }
+        )
+    return out
+
+
+def get_my_part_time_summary(auth_user_id: str, month: Optional[str] = None):
+    try:
+        employee_id = get_employee_id_for_auth_user(auth_user_id)
+        if not employee_id:
+            forbidden("No employee profile is linked to this account.")
+        first, last = _parse_month(month)
+        emp = (
+            supabase_admin.table("employees")
+            .select("id, employee_id, full_name, is_part_time")
+            .eq("id", employee_id)
+            .maybe_single()
+            .execute()
+        )
+        if not emp or not emp.data or not emp.data.get("is_part_time"):
+            return success_response(
+                message="Not a part-time employee.", data={"is_part_time": False}
+            )
+        summary = _part_time_summaries([emp.data], first, last)[0]
+        summary["is_part_time"] = True
+        return success_response(message="Monthly summary fetched.", data=summary)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(e)
+        internal_server_error("Unable to fetch part-time summary.")
+
+
+def get_all_part_time_summary(month: Optional[str] = None):
+    try:
+        first, last = _parse_month(month)
+        emps = (
+            supabase_admin.table("employees")
+            .select("id, employee_id, full_name")
+            .eq("is_part_time", True)
+            .order("full_name")
+            .execute()
+        ).data or []
+        return success_response(
+            message="Part-time monthly summary fetched.",
+            data=_part_time_summaries(emps, first, last),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(e)
+        internal_server_error("Unable to fetch part-time summary.")

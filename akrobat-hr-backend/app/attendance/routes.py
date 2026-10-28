@@ -23,6 +23,8 @@ from app.attendance.services import (
     start_break,
     end_break,
     get_my_attendance,
+    get_my_part_time_summary,
+    get_all_part_time_summary,
     get_attendance_timeline,
     submit_regularization,
     get_my_regularizations,
@@ -260,6 +262,22 @@ def my_attendance(
     user=Depends(get_current_user),
 ):
     return get_my_attendance(user.id, from_date=from_date, to_date=to_date)
+
+
+# Part-time: days worked + total hours for a month (YYYY-MM, default = this month)
+@router.get("/part-time/my-summary")
+def part_time_my_summary(
+    month: str | None = Query(None), user=Depends(get_current_user)
+):
+    return get_my_part_time_summary(user.id, month)
+
+
+@router.get("/part-time/summary")
+def part_time_all_summary(
+    month: str | None = Query(None),
+    user=Depends(require_permission("VIEW_ALL_ATTENDANCE")),
+):
+    return get_all_part_time_summary(month)
 
 
 @router.get("/timeline/{target_date}")

@@ -6,6 +6,7 @@ import openpyxl
 from fastapi import HTTPException, UploadFile
 
 from app.core.database import supabase_admin
+from app.core.region import REGION_CHENNAI, get_region
 from app.core.responses import success_response
 from app.core.logger import logger
 from app.core.helpers.employee_helper import get_employee_id_for_auth_user
@@ -32,6 +33,15 @@ def _normalize_country(value, default: str = "SG") -> str:
         if text in names:
             return code
     return text
+
+
+def _region_country() -> Optional[str]:
+    """Chennai tab -> India calendar, Singapore tab -> Singapore calendar.
+    None when no region is active (Super Admin viewing all, background jobs)."""
+    region = get_region()
+    if not region:
+        return None
+    return "IN" if region == REGION_CHENNAI else "SG"
 
 
 def _country_variants(country: str) -> list[str]:
@@ -333,6 +343,10 @@ def get_saturday_holidays(country: str = "SG", year: int | None = None):
 
 def get_holidays(country=None):
 
+    # No explicit ?country= -> follow the active region (Chennai = IN only,
+    # Singapore = SG only).
+    country = country or _region_country()
+
     query = supabase_admin.table("holidays").select("*")
 
     if country:
@@ -419,12 +433,17 @@ def get_holiday_reminder_status(auth_user_id: str):
         tomorrow = today + timedelta(days=1)
 
         try:
-            response = (
+            reminder_query = (
                 supabase_admin.table("holidays")
                 .select("holiday_name, holiday_date")
                 .in_("holiday_date", [today.isoformat(), tomorrow.isoformat()])
-                .execute()
             )
+            region_country = _region_country()
+            if region_country:
+                reminder_query = reminder_query.in_(
+                    "country", _country_variants(region_country)
+                )
+            response = reminder_query.execute()
             rows = response.data or []
         except Exception as e:
             logger.error(f"Unable to check upcoming holidays: {e}")

@@ -161,6 +161,9 @@ class EmployeeCreate(BaseModel):
     # _get_employee_shift.
     alternate_saturday: bool = Field(default=False)
 
+    # Part-time staff: no shift/leave/OT; only worked time is calculated.
+    is_part_time: bool = Field(default=False)
+
     # Office-hours staff only: which Saturday timing applies (9:00-12:00 or
     # 8:30-12:30). Optional -- omitted/None keeps the old default Office
     # Saturday. See sql/034.sql and app/attendance/services.py.
@@ -282,6 +285,8 @@ class EmployeeUpdate(BaseModel):
     works_saturday: Optional[bool] = None
 
     alternate_saturday: Optional[bool] = None
+
+    is_part_time: Optional[bool] = None
 
     saturday_shift_id: Optional[UUID] = None
 
