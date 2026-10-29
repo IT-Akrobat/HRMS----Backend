@@ -121,6 +121,18 @@ def get_admin_dashboard():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _part_time_employee_ids() -> set:
+    """Part-time staff have no shift / late / absent, so the attendance
+    trend chart leaves them out entirely (counts and click-through list)."""
+    rows = _fetch_all(
+        lambda: supabase_admin.table("employees")
+        .select("id")
+        .eq("is_part_time", True)
+        .order("id")
+    )
+    return {r["id"] for r in rows}
+
+
 def get_attendance_trend(days: int = 7):
     """Present / late / on-leave / absent counts per day, for the last
     `days` days (inclusive of today) — feeds the dashboard trend chart.
@@ -134,7 +146,8 @@ def get_attendance_trend(days: int = 7):
 
         start = end - timedelta(days=days - 1)
 
-        sa_ids = get_excluded_employee_ids()  # Super Admins are not counted
+        # Super Admins + part-time staff are not counted
+        sa_ids = get_excluded_employee_ids() | _part_time_employee_ids()
 
         total_employees = len(
             [
@@ -255,7 +268,8 @@ def get_attendance_trend_detail(days: int = 7, status: str = "onTime"):
             )
             .order("id")
         )
-        sa_ids = get_excluded_employee_ids()  # Super Admins are not counted
+        # Super Admins + part-time staff are not counted
+        sa_ids = get_excluded_employee_ids() | _part_time_employee_ids()
         emp_by_id = {e["id"]: e for e in employees if e["id"] not in sa_ids}
 
         def to_person(employee_id, day_count):
