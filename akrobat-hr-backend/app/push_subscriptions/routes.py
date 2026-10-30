@@ -4,7 +4,7 @@ from app.core.config import VAPID_PUBLIC_KEY
 from app.core.responses import success_response
 from app.core.security import get_current_user
 from app.push_subscriptions.schemas import SubscribePushRequest, UnsubscribePushRequest
-from app.push_subscriptions.services import subscribe, unsubscribe
+from app.push_subscriptions.services import send_test_push, subscribe, unsubscribe
 
 router = APIRouter(prefix="/push-subscriptions", tags=["Push Subscriptions"])
 
@@ -37,6 +37,16 @@ def subscribe_device(data: SubscribePushRequest, user=Depends(get_current_user))
         auth=data.keys.auth,
         user_agent=data.user_agent,
     )
+
+
+# =========================
+# TEST PUSH (diagnostic)
+# =========================
+
+
+@router.post("/test")
+def test_push(user=Depends(get_current_user)):
+    return send_test_push(user.id)
 
 
 # =========================

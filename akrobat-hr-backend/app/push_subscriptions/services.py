@@ -2,7 +2,8 @@ from app.core.database import supabase_admin
 from app.core.exceptions import bad_request, internal_server_error
 from app.core.helpers.employee_helper import get_employee_id_for_auth_user
 from app.core.logger import logger
-from app.core.push import send_push
+from app.core.config import VAPID_CLAIMS_EMAIL
+from app.core.push import _vapid, push_configured, send_push
 from app.core.responses import success_response
 from fastapi import HTTPException
 
@@ -92,6 +93,82 @@ def delete_subscription_by_endpoint(endpoint: str):
 # =========================
 # SEND TO EVERY DEVICE AN EMPLOYEE HAS SUBSCRIBED
 # =========================
+
+
+def send_test_push(auth_user_id: str):
+    """
+    Diagnostic: sends a real push to every device this employee has
+    saved and reports, per device, whether the push service accepted it
+    (and the HTTP status / error if not). Does NOT prune anything, so
+    it's safe to call repeatedly. Use it to find out *why* closed-app
+    notifications don't arrive: no device saved, VAPID not configured,
+    or the push service rejecting the key.
+    """
+    try:
+        employee_id = _resolve_employee_id(auth_user_id)
+
+        if not push_configured():
+            return success_response(
+                message="Push is not configured on the server.",
+                data={"configured": False, "devices": 0, "results": []},
+            )
+
+        from pywebpush import WebPushException, webpush
+        import json
+
+        rows = (
+            supabase_admin.table("push_subscriptions")
+            .select("endpoint, p256dh, auth, user_agent")
+            .eq("employee_id", employee_id)
+            .execute()
+        )
+        results = []
+        for row in rows.data or []:
+            sub = {
+                "endpoint": row["endpoint"],
+                "keys": {"p256dh": row["p256dh"], "auth": row["auth"]},
+            }
+            entry = {
+                "device": (row.get("user_agent") or "unknown")[:70],
+                "push_service": row["endpoint"].split("/")[2],
+            }
+            try:
+                webpush(
+                    subscription_info=sub,
+                    data=json.dumps(
+                        {
+                            "title": "Test notification",
+                            "body": "Push is working on this device.",
+                            "url": "/",
+                        }
+                    ),
+                    vapid_private_key=_vapid,
+                    vapid_claims={"sub": VAPID_CLAIMS_EMAIL},
+                    ttl=60,
+                )
+                entry.update(ok=True, status=201)
+            except WebPushException as e:
+                resp = getattr(e, "response", None)
+                entry.update(
+                    ok=False,
+                    status=getattr(resp, "status_code", None),
+                    detail=(getattr(resp, "text", "") or str(e))[:200],
+                )
+            except Exception as e:  # noqa: BLE001
+                entry.update(ok=False, status=None, detail=str(e)[:200])
+            results.append(entry)
+
+        return success_response(
+            message="Test push attempted.",
+            data={"configured": True, "devices": len(results), "results": results},
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception(e)
+        internal_server_error("Unable to send test notification.")
 
 
 def send_push_to_employee(employee_id: str, title: str, body: str, url: str = "/"):
